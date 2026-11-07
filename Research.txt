@@ -1,0 +1,25 @@
+# Problem Statemet :
+
+i came across with the problem i face and gave priority to the most important problem to be solved 
+
+a real world example to choose this problem statement is i bought a watch(g-shock ga 2000f) it had manual and it really took me a lot of time
+to read the manual so a voice converter like a podcast style will keep me engaging 
+
+2nd problem i faced reading some free resources by unstop it said 5 min read but it took me 20 mins still havent complted it 
+exhausted so a podcast will be helpfull gpt make this all sounds good 
+
+so i am  building listenwise  
+
+what is the major problem in this project :
+
+
+understanding images pdfs and unformatted or messy data understanding the link all those things are challenging here 
+
+
+how we are creating a plan soft ui ux without more animation focus on simplicity and give mind peacfulness to users
+
+3 modes detailed explanation and less explation with important concepts and podcast style all these shouyld keep engaging 
+
+voice can be changed all those are extra feauutre 
+
+understand document is a important thing converting messy format to a structred format is very much important thing 

@@ -1,0 +1,32 @@
+{
+  "name": "listenwise-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ListenWise backend — AI-powered audio learning",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@google/genai": "^3.0.0",
+    "@mozilla/readability": "^0.6.0",
+    "cheerio": "^1.2.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.0",
+    "helmet": "^8.0.0",
+    "jsdom": "^31.0.0",
+    "multer": "^1.4.5-lts.1",
+    "pdfjs-dist": "^6.5.438",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.0",
+    "@types/jsdom": "^30.0.0",
+    "@types/multer": "^1.4.12",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
