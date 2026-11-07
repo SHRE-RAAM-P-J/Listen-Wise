@@ -8,17 +8,15 @@ Unlike basic summarization tools or plain text-to-speech readers, ListenWise rec
 
 ---
 
-## Current Status: Phase 2 Completed
+## Current Status: Phase 3 Completed
 
 | Phase | Description | Status |
 | :--- | :--- | :--- |
 | **Phase 0** | Monorepo structure, Vite + React + Express, Tailwind, health check | ✅ Complete |
 | **Phase 1** | Content Extraction (URL Readability + Cheerio, PDF.js, Markdown/Text, SSRF Security) | ✅ Complete |
 | **Phase 2** | AI Understanding Engine (Gemini LLM Provider, Chunking, Section-by-Section Teaching, Source Validation) | ✅ Complete |
-| **Phase 3** | Gnani AI Timbre v2.5 Speech Synthesis & Interactive Audio Player | ⏳ Planned |
-
-> [!NOTE]
-> **Audio Generation / TTS Notice:** Speech generation using Gnani AI Timbre v2.5 is scheduled for **Phase 3**. The current build generates the complete, verified pedagogical teaching script with chapters, source traceability, and conceptual breakdown.
+| **Phase 3** | Gnani AI Timbre v2.5 Speech Synthesis, WAV Parser & Merging, Temporary Audio Storage, Audio Streaming | ✅ Complete |
+| **Phase 4** | Advanced Player Polish & Interactive Transcripts | ⏳ Planned |
 
 ---
 
@@ -28,24 +26,21 @@ Unlike basic summarization tools or plain text-to-speech readers, ListenWise rec
 ListenWise/
 ├── client/                     # React 18 + Vite 6 + TypeScript + Tailwind CSS
 │   ├── src/
-│   │   ├── components/         # Reusable UI components (LessonViewer, etc.)
-│   │   ├── services/           # Typed API client (extraction, lesson generation)
-│   │   ├── types/              # Canonical Content Representation & Lesson models
+│   │   ├── components/         # Reusable UI components (LessonViewer with audio player)
+│   │   ├── services/           # Typed API client (extraction, lesson generation, TTS generation)
+│   │   ├── types/              # Canonical Content Representation & Lesson/Audio models
 │   │   └── App.tsx             # Interactive 3-mode input & lesson presentation
 │   └── package.json
 │
 ├── server/                     # Node.js + Express + TypeScript
 │   ├── src/
-│   │   ├── models/             # Canonical Content Representation (CCR) & Lesson models (Zod schemas)
+│   │   ├── models/             # Canonical Content Representation (CCR) & Lesson/Audio models
 │   │   ├── services/
 │   │   │   ├── extraction/     # URL (Cheerio + Readability), PDF (pdfjs-dist), Text extractors
-│   │   │   └── ai/             # AI Understanding Engine:
-│   │   │       ├── providers/  # LLM Provider abstraction (Gemini 2.5 Flash, Mock for CI)
-│   │   │       ├── chunking.service.ts
-│   │   │       ├── prompt-builder.service.ts
-│   │   │       ├── lesson-validator.service.ts
-│   │   │       └── lesson-generator.service.ts
-│   │   ├── routes/             # REST API routes (/api/extract, /api/lessons)
+│   │   │   ├── ai/             # AI Understanding Engine (Gemini 2.5 Flash, chunking, validator)
+│   │   │   ├── tts/            # Gnani AI Timbre v2.5 TTS Integration & WAV binary merger
+│   │   │   └── storage/        # Temporary audio file management & cleanup
+│   │   ├── routes/             # REST API routes (/api/extract, /api/lessons, /api/tts)
 │   │   ├── utils/              # Enterprise URL security & SSRF protection
 │   │   └── config.ts           # Central typed configuration
 │   └── package.json
@@ -90,13 +85,15 @@ Edit `server/.env` with your credentials:
 PORT=3001
 NODE_ENV=development
 
-# Google Gemini API (AI Understanding Engine)
+# Google Gemini API (Phase 2: AI Understanding Engine)
 # Get a key at: https://aistudio.google.com/
 GEMINI_API_KEY=your_actual_gemini_api_key_here
 GEMINI_MODEL=gemini-2.5-flash
 
-# Gnani AI Timbre TTS (Phase 3: Speech Synthesis — future)
-GNANI_API_KEY=
+# Gnani AI Timbre TTS (Phase 3: Speech Synthesis)
+# Endpoint: https://api.vachana.ai/api/v1/tts/inference
+# Authentication header: X-API-Key-ID
+GNANI_API_KEY=your_actual_gnani_api_key_here
 
 # File storage & limits
 TEMP_DIR=./tmp
@@ -104,7 +101,7 @@ MAX_UPLOAD_SIZE_MB=20
 ```
 
 > [!TIP]
-> If `GEMINI_API_KEY` is omitted, the server still boots safely without crashing. Requests to `/api/lessons/generate` will return a clear HTTP 503 configuration error. Automated tests use deterministic mock providers when offline.
+> If credentials are not yet set, the server still boots safely without crashing. Requests will return clean HTTP 503 configuration errors. The automated test suites use deterministic mock providers when offline.
 
 ---
 
@@ -134,29 +131,31 @@ The Vite dev server automatically proxies all `/api/*` requests to the Express b
 
 ## API Endpoints
 
-### Extraction Endpoints (Phase 1)
+### 1. Extraction Endpoints (Phase 1)
 - `POST /api/extract/url` — `{ "url": "https://..." }` (SSRF-protected webpage extraction)
 - `POST /api/extract/pdf` — Multipart form-data with `file` (reading order, headings, tables)
 - `POST /api/extract/text` — `{ "text": "...", "title": "..." }` (Markdown & text normalization)
 
-### AI Understanding Engine Endpoints (Phase 2)
+### 2. AI Understanding Engine Endpoints (Phase 2)
 - `POST /api/lessons/generate` (also `/api/lesson/generate`)
-  - Accepts either:
-    - `{ "content": <StructuredContent> }` — Canonical Content Representation from Phase 1
-    - `{ "url": "https://..." }` — Direct extraction + generation
-    - `{ "text": "...", "title": "..." }` — Direct text + generation
-  - Returns complete, structured, grounded educational lesson JSON:
-    - `documentTitle`, `subject`, `purpose`, `lessonOverview`
-    - `keyConcepts`: Array of source-grounded concepts with explanations
-    - `chapters`: Array of topic-specific chapters with `teachingScript`, `conceptsCovered`, `transitionToNext`, and `sourceReferences` (`blockId`, `pageNumber`, `sectionTitle`)
-    - `completeLessonScript`: Unified script with pedagogical bridges
-    - `validation`: `sourceCoverage` score, `unsupportedClaims` verification, and warnings
+  - Accepts pre-extracted CCR or direct `{ "url": "..." }` / `{ "text": "..." }`
+  - Returns complete, structured, grounded educational lesson JSON with chapters and validation.
+
+### 3. Gnani AI Audio Generation Endpoints (Phase 3)
+- `POST /api/tts/generate`
+  - Accepts `{ "lesson": <Lesson>, "options": { "voice": "Nalini", "speed": 1.0 } }` or `{ "text": "..." }`
+  - Synthesizes audio sequentially for each chapter using Gnani Timbre v2.5 (`https://api.vachana.ai/api/v1/tts/inference`).
+  - Handles sentence-boundary chunking, merges binary WAV buffers, saves audio to temporary storage, and returns playable references (`AudioSegment[]`).
+- `GET /api/tts/audio/:lessonId/:filename`
+  - Streams temporary binary WAV audio. Supports HTTP 206 Partial Content (`Range: bytes=start-end`) for streaming and seeking.
+- `DELETE /api/tts/audio/:lessonId`
+  - Cleans up temporary audio files for a lesson.
 
 ---
 
 ## Automated Test Suites
 
-ListenWise includes 64 comprehensive automated tests covering all pipelines:
+ListenWise includes **86 comprehensive automated tests** across all pipelines:
 
 ```bash
 # Run Phase 1 Extraction Tests (35 tests)
@@ -166,23 +165,25 @@ npx tsx src/test-pipeline.ts
 # Run Phase 2 AI Understanding Engine Tests (29 tests)
 cd server
 npx tsx src/test-ai-engine.ts
+
+# Run Phase 3 Gnani AI Audio Generation Tests (22 tests)
+cd server
+npx tsx src/test-tts-pipeline.ts
 ```
 
-### What the Phase 2 Test Suite Verifies:
-1. **Technical article input** (HTML with equations, tables, code blocks)
-2. **PDF-derived canonical content** (PDF reading order, multi-section hierarchy)
-3. **Multiple sections** with heading depth preservation
-4. **Technical terminology** and conceptual definitions
-5. **Formulas and significant numbers** ($Attention(Q,K,V)$, $28.4$ BLEU)
-6. **Code blocks and tabular matrices**
-7. **Large document chunking** (preserving section boundaries and block IDs)
-8. **Missing API key handling** (AppError 503 without crashing)
-9. **Empty & invalid provider response handling**
-10. **Structured JSON validation & markdown fence repair**
-11. **Unsupported claim detection** (flags unverified metrics)
-12. **Source coverage validation** (calculates real section coverage)
-13. **Source reference validation** (detects non-existent block IDs)
-14. **Live Gemini integration** (conditional on credentials)
+### What the Phase 3 Test Suite Verifies:
+1. **WAV binary parsing**: Sample rate (24000 Hz), channels (mono), bits (16-bit PCM), and precise duration calculation.
+2. **Chunked WAV merging**: Combines multiple raw PCM audio buffers and updates the 44-byte RIFF header seamlessly without audible clicks.
+3. **Sentence-boundary chunking**: Splits long scripts at sentence boundaries (`. `, `! `, `? `) respecting Gnani's per-request character limits.
+4. **Short script audio generation**: Synthesizes binary audio and extracts duration.
+5. **Multi-chapter lesson generation**: Sequential synthesis across 3 chapters, saves to temporary storage, attaches `audioSegment` metadata, and computes total lesson audio duration.
+6. **Error handling**:
+   - Clean `AppError(503)` when `GNANI_API_KEY` is missing.
+   - `AppError(404)` for non-existent audio files.
+   - `AppError(402)` for insufficient credits.
+   - `AppError(429)` for rate limit backoff.
+7. **Temporary storage cleanup**: Safe deletion of temporary lesson audio folders.
+8. **Live Gnani API verification**: Verifies actual binary WAV response if `GNANI_API_KEY` is present.
 
 ---
 

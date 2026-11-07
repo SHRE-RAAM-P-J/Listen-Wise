@@ -9,9 +9,13 @@ import {
   Info,
   Clock,
   ShieldCheck,
+  Volume2,
+  Loader2,
+  Play,
 } from 'lucide-react';
-import { GeneratedLesson } from '../types/lesson';
+import { GeneratedLesson, AudioSegment } from '../types/lesson';
 import { StructuredContent } from '../types/structured-content';
+import { generateLessonAudioApi } from '../services/api';
 
 interface LessonViewerProps {
   lesson: GeneratedLesson;
@@ -20,17 +24,54 @@ interface LessonViewerProps {
 }
 
 export const LessonViewer: React.FC<LessonViewerProps> = ({
-  lesson,
+  lesson: initialLesson,
   extractedContent,
   onReset,
 }) => {
+  const [lesson, setLesson] = useState<GeneratedLesson>(initialLesson);
   const [activeChapterIndex, setActiveChapterIndex] = useState(0);
+  const [isSynthesizing, setIsSynthesizing] = useState(false);
+  const [ttsError, setTtsError] = useState<string | null>(null);
+
   const activeChapter = lesson.chapters[activeChapterIndex] || lesson.chapters[0];
+  const activeAudioSegment: AudioSegment | undefined =
+    activeChapter.audioSegment ||
+    lesson.audioSegments?.find((s) => s.chapterIndex === (activeChapter.index || activeChapterIndex + 1));
+
+  const hasAudio = Boolean(lesson.audioSegments && lesson.audioSegments.length > 0);
+
+  const handleGenerateAudio = async () => {
+    setIsSynthesizing(true);
+    setTtsError(null);
+
+    try {
+      const audioResult = await generateLessonAudioApi(lesson);
+      // Update lesson with audio metadata
+      const updatedChapters = lesson.chapters.map((ch, idx) => {
+        const seg = audioResult.audioSegments.find(
+          (s) => s.chapterIndex === (ch.index || idx + 1),
+        );
+        return seg ? { ...ch, audioSegment: seg } : ch;
+      });
+
+      setLesson({
+        ...lesson,
+        chapters: updatedChapters,
+        audioSegments: audioResult.audioSegments,
+        totalAudioDurationSeconds: audioResult.totalDurationSeconds,
+      });
+    } catch (err: any) {
+      console.error('[TTS Error]', err);
+      setTtsError(err.message || 'Failed to synthesize speech audio.');
+    } finally {
+      setIsSynthesizing(false);
+    }
+  };
 
   return (
     <div className="w-full max-w-4xl mx-auto space-y-8 animate-in fade-in-50 duration-300">
       {/* Top action / back bar */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <button
           type="button"
           onClick={onReset}
@@ -40,16 +81,49 @@ export const LessonViewer: React.FC<LessonViewerProps> = ({
           <span>New Material</span>
         </button>
 
-        <div className="flex items-center gap-2">
-          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">
-            <CheckCircle2 className="w-3.5 h-3.5" />
-            <span>AI Lesson Generated</span>
-          </span>
+        <div className="flex items-center gap-3">
+          {!hasAudio ? (
+            <button
+              type="button"
+              disabled={isSynthesizing}
+              onClick={handleGenerateAudio}
+              className="inline-flex items-center gap-2 text-xs font-medium bg-brand-600 text-white px-3.5 py-2 rounded-lg hover:bg-brand-700 disabled:opacity-50 transition shadow-2xs"
+            >
+              {isSynthesizing ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <span>Synthesizing Timbre Audio...</span>
+                </>
+              ) : (
+                <>
+                  <Volume2 className="w-3.5 h-3.5" />
+                  <span>Generate Audio (Gnani Timbre v2.5)</span>
+                </>
+              )}
+            </button>
+          ) : (
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">
+              <Volume2 className="w-3.5 h-3.5" />
+              <span>Audio Ready ({lesson.totalAudioDurationSeconds}s)</span>
+            </span>
+          )}
+
           <span className="text-xs text-stone-400">
             {lesson.chapters.length} {lesson.chapters.length === 1 ? 'Chapter' : 'Chapters'}
           </span>
         </div>
       </div>
+
+      {/* TTS Error Notice if synthesis fails */}
+      {ttsError && (
+        <div className="p-4 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-2.5">
+          <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+          <div className="space-y-1">
+            <p className="font-semibold">Speech Generation Notice</p>
+            <p>{ttsError}</p>
+          </div>
+        </div>
+      )}
 
       {/* Lesson Header Banner */}
       <div className="bg-white rounded-2xl border border-stone-200/90 p-6 sm:p-8 shadow-xs space-y-4">
@@ -102,13 +176,17 @@ export const LessonViewer: React.FC<LessonViewerProps> = ({
         </div>
       )}
 
-      {/* Chapter Reader Container */}
+      {/* Chapter Reader & Audio Player Container */}
       <div className="bg-white rounded-2xl border border-stone-200/90 shadow-xs overflow-hidden">
         {/* Chapter Tabs Navigation */}
         <div className="border-b border-stone-200 bg-stone-50/70 p-2 overflow-x-auto">
           <div className="flex items-center gap-1.5 min-w-max">
             {lesson.chapters.map((ch, idx) => {
               const isActive = idx === activeChapterIndex;
+              const chapterHasAudio = Boolean(
+                ch.audioSegment ||
+                lesson.audioSegments?.some((s) => s.chapterIndex === (ch.index || idx + 1)),
+              );
               return (
                 <button
                   key={ch.id || idx}
@@ -128,11 +206,42 @@ export const LessonViewer: React.FC<LessonViewerProps> = ({
                     {idx + 1}
                   </span>
                   <span className="truncate max-w-[180px]">{ch.title}</span>
+                  {chapterHasAudio && (
+                    <Volume2 className="w-3 h-3 text-emerald-600 shrink-0" />
+                  )}
                 </button>
               );
             })}
           </div>
         </div>
+
+        {/* Audio Player Bar (if chapter has audio generated) */}
+        {activeAudioSegment && activeAudioSegment.audioUrl && (
+          <div className="p-4 bg-brand-50/50 border-b border-brand-100 flex flex-col sm:flex-row items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-lg bg-brand-600 text-white flex items-center justify-center shrink-0">
+                <Play className="w-4 h-4 fill-white" />
+              </div>
+              <div>
+                <p className="text-xs font-semibold text-stone-900">
+                  Chapter {activeChapterIndex + 1} Audio: {activeChapter.title}
+                </p>
+                <p className="text-[11px] text-stone-500">
+                  Gnani AI Timbre v2.5 • Duration: {activeAudioSegment.durationSeconds}s
+                </p>
+              </div>
+            </div>
+
+            <audio
+              controls
+              className="w-full sm:w-80 h-9"
+              src={activeAudioSegment.audioUrl}
+              key={activeAudioSegment.audioUrl}
+            >
+              Your browser does not support the audio element.
+            </audio>
+          </div>
+        )}
 
         {/* Active Chapter Teaching Content */}
         <div className="p-6 sm:p-8 space-y-6">
@@ -263,22 +372,6 @@ export const LessonViewer: React.FC<LessonViewerProps> = ({
             <ul className="list-disc list-inside space-y-0.5 pl-1 text-[11px]">
               {lesson.validation.warnings.map((warn, wIdx) => (
                 <li key={wIdx}>{warn}</li>
-              ))}
-            </ul>
-          </div>
-        )}
-
-        {lesson.validation.unsupportedClaims && lesson.validation.unsupportedClaims.length > 0 && (
-          <div className="space-y-1.5 text-xs text-rose-800 bg-rose-50 p-3 rounded-xl border border-rose-200">
-            <div className="flex items-center gap-1.5 font-semibold">
-              <AlertTriangle className="w-3.5 h-3.5 text-rose-600" />
-              <span>Unsupported Claim Flags</span>
-            </div>
-            <ul className="list-disc list-inside space-y-0.5 pl-1 text-[11px]">
-              {lesson.validation.unsupportedClaims.map((claim, cIdx) => (
-                <li key={cIdx}>
-                  <strong>{claim.claim}:</strong> {claim.reason}
-                </li>
               ))}
             </ul>
           </div>

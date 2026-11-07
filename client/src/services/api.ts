@@ -1,5 +1,5 @@
 import { StructuredContent } from '../types/structured-content.js';
-import { GeneratedLesson } from '../types/lesson.js';
+import { GeneratedLesson, LessonAudioResult } from '../types/lesson.js';
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
 
@@ -75,4 +75,16 @@ export async function generateLessonApi(content: StructuredContent): Promise<Gen
     body: JSON.stringify({ content }),
   });
   return handleResponse<GeneratedLesson>(res);
+}
+
+export async function generateLessonAudioApi(
+  lesson: GeneratedLesson,
+  options?: { voice?: string; speed?: number },
+): Promise<LessonAudioResult> {
+  const res = await fetch(`${API_BASE}/api/tts/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ lesson, options }),
+  });
+  return handleResponse<LessonAudioResult>(res);
 }

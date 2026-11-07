@@ -1,5 +1,5 @@
 /**
- * Client-side type definitions for generated lessons.
+ * Client-side type definitions for generated lessons and audio playback metadata.
  * Mirrors server lesson models.
  */
 
@@ -15,6 +15,28 @@ export interface KeyConcept {
   sourceReferences: string[];
 }
 
+export interface AudioSegment {
+  chapterId: string;
+  chapterIndex: number;
+  chapterTitle: string;
+  audioUrl: string;
+  audioPath: string;
+  durationSeconds: number;
+  fileSizeBytes: number;
+  format: string;
+  status: 'pending' | 'processing' | 'completed' | 'failed';
+  error?: string;
+  createdAt: string;
+}
+
+export interface LessonAudioResult {
+  lessonId: string;
+  totalDurationSeconds: number;
+  audioSegments: AudioSegment[];
+  allChaptersCompleted: boolean;
+  createdAt: string;
+}
+
 export interface LessonChapter {
   id: string;
   index?: number;
@@ -25,6 +47,7 @@ export interface LessonChapter {
   transitionToNext: string;
   sourceReferences: ChapterSourceReference[];
   estimatedDurationSeconds?: number;
+  audioSegment?: AudioSegment;
 }
 
 export interface UnsupportedClaimItem {
@@ -53,6 +76,8 @@ export interface GeneratedLesson {
   chapters: LessonChapter[];
   completeLessonScript: string;
   validation: LessonValidation;
+  audioSegments?: AudioSegment[];
+  totalAudioDurationSeconds?: number;
   createdAt: string;
 }
 

@@ -8,6 +8,7 @@ import { config } from './config.js';
 import { errorHandler } from './middleware/error-handler.js';
 import extractRouter from './routes/extract.js';
 import lessonRouter from './routes/lesson.js';
+import ttsRouter from './routes/tts.js';
 
 const app: express.Application = express();
 
@@ -36,7 +37,8 @@ app.use('/api/extract', extractRouter);
 // ─── AI Understanding & Lesson Engine Routes ──────────────────
 app.use('/api/lessons', lessonRouter);
 app.use('/api/lesson', lessonRouter);
-// app.use('/api/tts', ttsRoutes);
+// ─── Gnani AI Speech Synthesis Routes (Phase 3) ───────────────
+app.use('/api/tts', ttsRouter);
 
 // ─── Error handling ───────────────────────────────────────────
 app.use(errorHandler);
