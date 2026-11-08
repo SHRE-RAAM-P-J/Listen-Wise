@@ -30,4 +30,5 @@ export const config = {
   // Gemini retries are bounded in its provider; this shared setting remains for TTS.
   maxRetries: parseInt(process.env.AI_MAX_RETRIES || '2', 10),
   requestTimeoutMs: parseInt(process.env.AI_TIMEOUT_MS || '90000', 10),
+  geminiRetryBaseDelayMs: parseInt(process.env.GEMINI_RETRY_BASE_DELAY_MS || '500', 10),
 } as const;

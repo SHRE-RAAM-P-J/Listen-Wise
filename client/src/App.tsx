@@ -43,6 +43,9 @@ export default function App() {
           lesson={pipeline.lesson}
           error={pipeline.error}
           failurePoint={pipeline.failurePoint}
+          failureCode={pipeline.failureCode}
+          failureType={pipeline.failureType}
+          failureRetryable={pipeline.failureRetryable}
           busy={pipeline.busy}
           onRetry={pipeline.retry}
           onOpenLesson={pipeline.openLesson}

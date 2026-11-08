@@ -2,7 +2,7 @@ import { StructuredContent } from '../../models/structured-content.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { config } from '../../config.js';
 
-type BoilerplateKind = 'loading' | 'cookie-consent' | 'browser-compatibility' | 'bot-block';
+type BoilerplateKind = 'loading' | 'cookie-consent' | 'browser-compatibility' | 'bot-block' | 'login-required';
 
 const URL_BOILERPLATE: Array<{ kind: BoilerplateKind; pattern: RegExp }> = [
   {
@@ -14,12 +14,20 @@ const URL_BOILERPLATE: Array<{ kind: BoilerplateKind; pattern: RegExp }> = [
     pattern: /(?:we use cookies\b|this site uses cookies\b|accept (?:all )?cookies\b|cookie (?:consent|settings|preferences)\b|by continuing.{0,80}cookies)/i,
   },
   {
+    kind: 'loading',
+    pattern: /\b(?:article|document|guide) is loading\b/i,
+  },
+  {
     kind: 'browser-compatibility',
     pattern: /(?:browser compatibility|(?:your )?browser (?:is )?(?:not supported|unsupported|not compatible|out of date)|please (?:update|upgrade) your browser|upgrade your browser)/i,
   },
   {
     kind: 'bot-block',
     pattern: /(?:access denied|unusual traffic|verify (?:that )?you are human|are you human|automated requests? (?:are|have)|request blocked|bot protection|captcha|security check|cloudflare)/i,
+  },
+  {
+    kind: 'login-required',
+    pattern: /(?:sign[ -]in required|log[ -]in required|please sign in to (?:continue|view|read)|please log in to (?:continue|view|read)|members only|authentication required|subscribe to continue)/i,
   },
   {
     kind: 'loading',
@@ -54,8 +62,22 @@ function actionableError(content: StructuredContent): AppError {
 
   if (content.source?.type === 'url') {
     const sourceContext = sourceUrl ? ` (${sourceUrl})` : '';
+    const body = bodyText(content).toLowerCase();
+    const recovery = 'Open the page in Chrome, press Ctrl+P, choose Save as PDF, and upload that PDF; or paste the article text.';
+    if (URL_BOILERPLATE.find(({ kind, pattern }) => kind === 'login-required' && pattern.test(body))) {
+      return new AppError(`The page "${title}"${sourceContext} requires sign-in before its content can be read. ${recovery}`, 422, 'SOURCE_LOGIN_REQUIRED');
+    }
+    if (URL_BOILERPLATE.find(({ kind, pattern }) => kind === 'bot-block' && pattern.test(body))) {
+      return new AppError(`The website for "${title}"${sourceContext} blocks automated access. ${recovery}`, 422, 'SOURCE_AUTOMATED_ACCESS_BLOCKED');
+    }
+    if (URL_BOILERPLATE.find(({ kind, pattern }) => kind === 'browser-compatibility' && pattern.test(body))) {
+      return new AppError(`The page "${title}"${sourceContext} says the current browser cannot display its content. ${recovery}`, 422, 'SOURCE_BROWSER_INCOMPATIBLE');
+    }
+    if (URL_BOILERPLATE.find(({ kind, pattern }) => kind === 'loading' && pattern.test(body))) {
+      return new AppError(`The page "${title}"${sourceContext} may require JavaScript to show its article content. ${recovery}`, 422, 'SOURCE_REQUIRES_JAVASCRIPT');
+    }
     return new AppError(
-      `We couldn't extract the actual article content for "${title}"${sourceContext}. This page may require JavaScript or block automated access. Try pasting the article text or uploading a PDF.`,
+      `The website opened, but ListenWise could not extract meaningful article content from "${title}"${sourceContext}. ${recovery}`,
       422,
       'SOURCE_CONTENT_UNAVAILABLE',
     );
@@ -84,6 +106,16 @@ export class SourceQualityService {
       const sentences = rawBody.split(/(?<=[.!?])\s+|\n+/).filter(Boolean);
       const meaningful = sentences.filter((sentence) => !URL_BOILERPLATE.some(({ pattern }) => pattern.test(sentence)));
       if (meaningful.length === 0) throw actionableError(content);
+      if (content.extractionWarnings?.some((warning) => warning.includes('recovered with OCR'))) {
+        const ocrBody = meaningful.join(' ');
+        if (words(ocrBody).length < 20 || (ocrBody.match(/[\p{L}\p{N}]/gu) || []).length < 100) {
+          throw new AppError(
+            `OCR recovered too little readable text from "${content.title}". Try a clearer or higher-resolution PDF, or paste the document text.`,
+            422,
+            'PDF_OCR_UNREADABLE',
+          );
+        }
+      }
       return;
     }
 

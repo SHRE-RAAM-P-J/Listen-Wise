@@ -1,6 +1,7 @@
 import { config } from '../../config.js';
 import { AppError } from '../../middleware/error-handler.js';
 import { LessonValidatorService } from '../ai/lesson-validator.service.js';
+import { performance } from 'node:perf_hooks';
 import { WavUtils } from './wav-utils.js';
 import { TempStorageService } from '../storage/temp-storage.service.js';
 import { Lesson, LessonChapter, AudioSegment, LessonAudioResult } from '../../models/lesson.js';
@@ -135,13 +136,6 @@ export class GnaniTtsService {
 
         if (!res.ok) {
           const status = res.status;
-          let errorText = '';
-          try {
-            errorText = await res.text();
-          } catch {
-            // ignore
-          }
-
           if (status === 401 || status === 403) {
             throw new AppError('Invalid or unauthorized GNANI_API_KEY. Please verify your credentials in server/.env.', 401, 'INVALID_GNANI_KEY');
           }
@@ -157,8 +151,10 @@ export class GnaniTtsService {
             }
             throw new AppError('Gnani AI Timbre rate limit exceeded. Please wait a moment before retrying.', 429, 'RATE_LIMIT_EXCEEDED');
           }
-
-          throw new AppError(`Gnani TTS failed with status HTTP ${status}: ${errorText || res.statusText}`, 502, 'TTS_SERVICE_ERROR');
+          if (status >= 500 || status === 408) {
+            throw new AppError('Gnani audio service is temporarily unavailable. Retry audio; your lesson is preserved.', 503, 'TTS_SERVICE_ERROR');
+          }
+          throw new AppError(`Gnani could not synthesize this audio request (HTTP ${status}). Check the lesson text and retry audio.`, 502, 'TTS_REQUEST_REJECTED');
         }
 
         // Response is documented binary WAV audio
@@ -174,7 +170,7 @@ export class GnaniTtsService {
         if (err instanceof AppError) throw err;
 
         if (err.name === 'AbortError') {
-          throw new AppError('Gnani TTS request timed out after 45 seconds.', 504, 'TTS_TIMEOUT');
+          throw new AppError(`Gnani TTS request timed out after ${Math.ceil(config.requestTimeoutMs / 1000)} seconds. Retry audio; your lesson is preserved.`, 504, 'TTS_TIMEOUT');
         }
 
         if (attempt < maxRetries) {
@@ -183,7 +179,7 @@ export class GnaniTtsService {
           continue;
         }
 
-        throw new AppError(`Gnani TTS network request failed: ${err.message}`, 502, 'TTS_NETWORK_ERROR');
+        throw new AppError('Could not connect to the Gnani audio service after retrying. Check the server network and retry audio; your lesson is preserved.', 502, 'TTS_NETWORK_ERROR');
       }
     }
 
@@ -231,6 +227,7 @@ export class GnaniTtsService {
     }
 
     const lessonId = lesson.id || `lesson-${Date.now()}`;
+    const audioStartedAt = performance.now();
     const audioSegments: AudioSegment[] = [];
     let totalDurationSeconds = 0;
 
@@ -241,6 +238,7 @@ export class GnaniTtsService {
       const chapter = lesson.chapters[idx];
       const chapterIndex = chapter.index || idx + 1;
       const chapterTitle = chapter.title || `Chapter ${chapterIndex}`;
+      const chapterStartedAt = performance.now();
 
       try {
         // Synthesize binary audio
@@ -275,7 +273,10 @@ export class GnaniTtsService {
         totalDurationSeconds += meta.durationSeconds;
 
         console.log(`  ✅ Chapter ${chapterIndex} completed: "${chapterTitle}" (${meta.durationSeconds}s, ${Math.round(wavBuffer.length / 1024)} KB)`);
+        console.info(`[Timing] Audio synthesis for chapter ${chapterIndex} completed in ${Math.round(performance.now() - chapterStartedAt)}ms.`);
       } catch (err: any) {
+        console.info(`[Timing] Audio synthesis for chapter ${chapterIndex} failed after ${Math.round(performance.now() - chapterStartedAt)}ms.`);
+        console.info(`[Timing] Lesson audio request failed after ${Math.round(performance.now() - audioStartedAt)}ms.`);
         console.error(`  ❌ Failed to generate audio for Chapter ${chapterIndex}:`, err.message);
         const failedSegment: AudioSegment = {
           chapterId: chapter.id,
@@ -297,6 +298,7 @@ export class GnaniTtsService {
     }
 
     const allCompleted = audioSegments.every((s) => s.status === 'completed');
+    console.info(`[Timing] Lesson audio synthesis completed in ${Math.round(performance.now() - audioStartedAt)}ms.`);
 
     return {
       lessonId,

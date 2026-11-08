@@ -4,6 +4,45 @@ import {
   ContentBlock,
 } from '../../models/structured-content.js';
 import { AppError } from '../../middleware/error-handler.js';
+import { createCanvas } from '@napi-rs/canvas';
+import { recognizePdfPage } from './ocr.service.js';
+import { performance } from 'node:perf_hooks';
+
+export interface PdfExtractionOptions {
+  /** Injectable OCR hook for deterministic tests; production uses Tesseract.js. */
+  recognizePage?: (image: Buffer, pageNumber: number) => Promise<string>;
+}
+
+const MAX_PDF_PAGES = 50;
+const OCR_MIN_WORDS = 25;
+const OCR_MIN_CHARS = 120;
+const OCR_READABLE_PAGE_MIN_WORDS = 8;
+const OCR_READABLE_PAGE_MIN_CHARS = 40;
+
+function pageTextIsInsufficient(text: string): boolean {
+  const words = text.match(/[\p{L}\p{N}]+/gu)?.length || 0;
+  const chars = text.match(/[\p{L}\p{N}]/gu)?.length || 0;
+  return words < OCR_MIN_WORDS || chars < OCR_MIN_CHARS;
+}
+
+function ocrPageIsUnreadable(text: string): boolean {
+  const words = text.match(/[\p{L}\p{N}]+/gu)?.length || 0;
+  const chars = text.match(/[\p{L}\p{N}]/gu)?.length || 0;
+  return words < OCR_READABLE_PAGE_MIN_WORDS || chars < OCR_READABLE_PAGE_MIN_CHARS;
+}
+
+async function renderPagePng(page: any): Promise<Buffer> {
+  const viewport = page.getViewport({ scale: 2 });
+  const maxPixels = 4_000_000;
+  const scale = Math.min(1, Math.sqrt(maxPixels / (viewport.width * viewport.height)));
+  const safeViewport = scale < 1 ? page.getViewport({ scale: 2 * scale }) : viewport;
+  const width = Math.ceil(safeViewport.width);
+  const height = Math.ceil(safeViewport.height);
+  const canvas = createCanvas(width, height);
+  const context = canvas.getContext('2d');
+  await page.render({ canvasContext: context, viewport: safeViewport }).promise;
+  return canvas.toBuffer('image/png');
+}
 
 /**
  * Extracts and reconstructs structured content from a PDF document buffer.
@@ -11,7 +50,9 @@ import { AppError } from '../../middleware/error-handler.js';
 export async function extractFromPdfBuffer(
   buffer: Buffer,
   originalFilename?: string,
+  options: PdfExtractionOptions = {},
 ): Promise<StructuredContent> {
+  const extractionStartedAt = performance.now();
   // Step 1: Validate PDF magic bytes (%PDF-)
   if (buffer.length < 5 || buffer.toString('utf-8', 0, 5) !== '%PDF-') {
     throw new AppError(
@@ -92,12 +133,20 @@ export async function extractFromPdfBuffer(
   };
 
   const numPages = doc.numPages;
+  if (numPages > MAX_PDF_PAGES) {
+    throw new AppError(
+      `This PDF has ${numPages} pages. Please split it into files of ${MAX_PDF_PAGES} pages or fewer before uploading.`,
+      413,
+      'PDF_PAGE_LIMIT_EXCEEDED',
+    );
+  }
 
   // Step 4: Iterate through all pages
   for (let pageNum = 1; pageNum <= numPages; pageNum++) {
     const page = await doc.getPage(pageNum);
     const textContent = await page.getTextContent();
-    const items = textContent.items as Array<any>;
+    let items = textContent.items as Array<any>;
+    let pageHasImage = false;
 
     // Check for images in operator list
     try {
@@ -110,6 +159,7 @@ export async function extractFromPdfBuffer(
         }
       }
       if (imageCount > 0) {
+        pageHasImage = true;
         currentSection.blocks.push({
           type: 'image',
           content: `Embedded figure or graphic on page ${pageNum}`,
@@ -119,6 +169,51 @@ export async function extractFromPdfBuffer(
       }
     } catch {
       // non-critical
+    }
+
+    const nativeText = items
+      .filter((item) => typeof item.str === 'string' && item.str.trim())
+      .map((item) => item.str.trim())
+      .join(' ');
+    if (pageTextIsInsufficient(nativeText) && (pageHasImage || nativeText.length > 0)) {
+      const ocrStartedAt = performance.now();
+      try {
+        console.info(`[PDF OCR] Recognizing page ${pageNum} of ${numPages}.`);
+        const image = await renderPagePng(page);
+        const recognized = await (options.recognizePage || recognizePdfPage)(image, pageNum);
+        const recognizedLines = recognized.split(/\r?\n/).map((line) => line.trim());
+        const recognizedText = recognizedLines.join(' ');
+        if (ocrPageIsUnreadable(recognizedText)) {
+          if (nativeText && !pageHasImage) {
+            // Preserve sparse selectable text on pages without embedded scans.
+          } else if (pageHasImage) {
+            throw new AppError(
+              `We couldn't read page ${pageNum} of "${title}". The scan may be too faint or low resolution. Try a clearer PDF or paste the text.`,
+              422,
+              'PDF_OCR_UNREADABLE',
+            );
+          }
+        } else {
+          // OCR lines are fed through the same paragraph, heading, list and page-number builder below.
+          items = recognizedLines.map((str, index) => ({
+            str,
+            // Keep line baselines apart for the existing PDF line grouper.
+            transform: [1, 0, 0, 10, 0, (recognizedLines.length - index) * 12],
+            height: 10,
+          }));
+          extractionWarnings.push(`Page ${pageNum} text was recovered with OCR.`);
+        }
+        console.info(`[Timing] OCR page ${pageNum} completed in ${Math.round(performance.now() - ocrStartedAt)}ms.`);
+      } catch (err: any) {
+        console.info(`[Timing] OCR page ${pageNum} failed after ${Math.round(performance.now() - ocrStartedAt)}ms.`);
+        if (err instanceof AppError) throw err;
+        console.warn(`[PDF OCR] OCR failed on page ${pageNum}.`);
+        throw new AppError(
+          `OCR could not process page ${pageNum} of "${title}". Try a text-based PDF or paste the document text.`,
+          422,
+          'PDF_OCR_FAILED',
+        );
+      }
     }
 
     if (!items || items.length === 0) {
@@ -237,22 +332,41 @@ export async function extractFromPdfBuffer(
       const trimmed = line.text.trim();
       if (!trimmed) continue;
 
+      // Preserve paragraph breaks when OCR reports a larger vertical gap between lines.
+      if (i > 0 && Math.abs(lines[i - 1].y - line.y) > medianHeight * 1.8) {
+        flushParagraph();
+      }
+
       // Skip common standalone header/footer page numbers (e.g. "1", "Page 2 of 10")
       if (/^(?:page\s+)?\d+(?:\s+of\s+\d+)?$/i.test(trimmed) && (i === 0 || i === lines.length - 1)) {
         continue;
       }
 
       // Check if line represents a heading based on font size (> 1.25 * median)
+      const isOcrHeading = line.fontSize === 10 && /^[A-Z][A-Z\d\s:,-]{2,80}$/.test(trimmed) && trimmed.length < 100;
       const isLargeFont = line.fontSize >= medianHeight * 1.25 && trimmed.length < 120;
       const isNumberedHeading = /^(?:Chapter|\d+\.|\d+\.\d+|Section)\s+/i.test(trimmed) && trimmed.length < 100;
 
-      if (isLargeFont || isNumberedHeading) {
+      if (isLargeFont || isNumberedHeading || isOcrHeading) {
         flushParagraph();
         commitSection();
         const level = line.fontSize >= medianHeight * 1.6 ? 1 : line.fontSize >= medianHeight * 1.3 ? 2 : 3;
         currentSection.heading = trimmed;
         currentSection.headingLevel = level;
         currentSection.pageNumber = pageNum;
+        continue;
+      }
+
+      if (/^[-*•]\s+/.test(trimmed)) {
+        flushParagraph();
+        const item = trimmed.replace(/^[-*•]\s+/, '').trim();
+        currentSection.blocks.push({ type: 'unordered-list', content: item, items: [item], pageNumber: pageNum });
+        continue;
+      }
+      if (/^\d+[.)]\s+/.test(trimmed)) {
+        flushParagraph();
+        const item = trimmed.replace(/^\d+[.)]\s+/, '').trim();
+        currentSection.blocks.push({ type: 'ordered-list', content: item, items: [item], pageNumber: pageNum });
         continue;
       }
 
@@ -302,7 +416,7 @@ export async function extractFromPdfBuffer(
     }
   }
 
-  return {
+  const extractedContent: StructuredContent = {
     title,
     authors,
     source: {
@@ -316,4 +430,6 @@ export async function extractFromPdfBuffer(
     language: 'en',
     extractionWarnings: extractionWarnings.length > 0 ? extractionWarnings : undefined,
   };
+  console.info(`[Timing] PDF extraction service completed in ${Math.round(performance.now() - extractionStartedAt)}ms.`);
+  return extractedContent;
 }

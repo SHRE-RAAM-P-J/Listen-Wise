@@ -2,12 +2,19 @@ import { GoogleGenAI } from '@google/genai';
 import { LLMProvider, LLMGenerateOptions, LLMResponse } from './llm-provider.interface.js';
 import { config } from '../../../config.js';
 import { AppError } from '../../../middleware/error-handler.js';
+import { performance } from 'node:perf_hooks';
 
 const MAX_TRANSIENT_RETRIES = 1;
-const RETRY_DELAY_MS = 1000;
+
+export function calculateRetryDelayMs(attempt: number, baseDelayMs: number, random: () => number = Math.random): number {
+  const exponentialDelay = baseDelayMs * (2 ** attempt);
+  return exponentialDelay + Math.floor(random() * Math.max(1, exponentialDelay * 0.5));
+}
 
 type GeminiFailureKind =
   | 'authentication'
+  | 'permission'
+  | 'quota'
   | 'unavailable-model'
   | 'timeout'
   | 'rate-limit'
@@ -32,11 +39,11 @@ function classifyGeminiFailure(err: unknown): { kind: GeminiFailureKind; status?
 
   if (
     status === 401 ||
-    status === 403 ||
     /api[_ ]key[_ ]invalid|invalid api key|api key not valid|unauthenticated/.test(message)
   ) {
     return { kind: 'authentication', status };
   }
+  if (status === 403) return { kind: 'permission', status };
   if (status === 404 || /model[^\n]*(not found|unavailable|does not exist)/.test(message)) {
     return { kind: 'unavailable-model', status };
   }
@@ -50,7 +57,10 @@ function classifyGeminiFailure(err: unknown): { kind: GeminiFailureKind; status?
   ) {
     return { kind: 'timeout', status };
   }
-  if (status === 429 || /resource_exhausted|rate.?limit|quota/.test(message)) {
+  if (/quota|billing|insufficient_quota|daily limit|exceeded your current plan/.test(message)) {
+    return { kind: 'quota', status };
+  }
+  if (status === 429 || /rate.?limit|too many requests|requests per minute/.test(message)) {
     return { kind: 'rate-limit', status };
   }
   if (status !== undefined && status >= 500) return { kind: 'server', status };
@@ -127,6 +137,7 @@ export class GeminiProvider implements LLMProvider {
     let lastError: unknown;
 
     for (let attempt = 0; attempt <= MAX_TRANSIENT_RETRIES; attempt++) {
+      const startedAt = performance.now();
       try {
         const genConfig: any = {
           temperature: options?.temperature ?? 0.2,
@@ -167,15 +178,18 @@ export class GeminiProvider implements LLMProvider {
             }
           : undefined;
 
+        console.info(`[Timing] Gemini request completed in ${Math.round(performance.now() - startedAt)}ms.`);
         return { text, usage };
       } catch (err: unknown) {
+        console.warn(`[Timing] Gemini request failed after ${Math.round(performance.now() - startedAt)}ms.`);
         lastError = err;
         const failure = classifyGeminiFailure(err);
         const retryable = ['timeout', 'rate-limit', 'server', 'network'].includes(failure.kind);
 
         if (retryable && attempt < MAX_TRANSIENT_RETRIES) {
-          console.warn(`[GeminiProvider] Transient ${failure.kind} error; retrying once.`);
-          await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+          const delayMs = calculateRetryDelayMs(attempt, config.geminiRetryBaseDelayMs);
+          console.warn(`[GeminiProvider] Transient ${failure.kind} error; retrying once after ${delayMs}ms.`);
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
           continue;
         }
 
@@ -184,6 +198,13 @@ export class GeminiProvider implements LLMProvider {
             'Gemini rejected the API key or its permissions. Verify GEMINI_API_KEY in server/.env.',
             failure.status || 401,
             'INVALID_API_KEY',
+          );
+        }
+        if (failure.kind === 'permission') {
+          throw new AppError(
+            'Gemini denied this API key permission to use the configured model. Check the key permissions and model access.',
+            403,
+            'GEMINI_PERMISSION_DENIED',
           );
         }
         if (failure.kind === 'unavailable-model') {
@@ -202,6 +223,9 @@ export class GeminiProvider implements LLMProvider {
         }
         if (failure.kind === 'rate-limit') {
           throw new AppError('Gemini rate limits were reached. Wait briefly, then try again.', 429, 'GEMINI_RATE_LIMITED');
+        }
+        if (failure.kind === 'quota') {
+          throw new AppError('Gemini quota is exhausted for this project. Check billing and model quota before retrying.', 429, 'GEMINI_QUOTA_EXHAUSTED');
         }
         if (failure.kind === 'server') {
           throw new AppError('Gemini is temporarily unavailable. Try generating the lesson again.', 503, 'GEMINI_SERVICE_UNAVAILABLE');
@@ -258,6 +282,7 @@ ${cleaned}
 Repair and return ONLY the completely valid, well-formed JSON object.`;
 
       const repairResponse = await this.generateText(repairPrompt, {
+        ...options,
         temperature: 0.0,
         responseMimeType: 'application/json',
       });

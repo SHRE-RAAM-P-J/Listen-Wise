@@ -9,15 +9,19 @@ import {
 } from '../../models/structured-content.js';
 import { safeFetchUrl } from '../../utils/url-security.js';
 import { AppError } from '../../middleware/error-handler.js';
+import { performance } from 'node:perf_hooks';
 
 /**
  * Extracts and converts an HTML document into the canonical structured representation (CCR).
  */
 export async function extractFromUrl(urlStr: string): Promise<StructuredContent> {
+  const startedAt = performance.now();
   // Step 1: Safely fetch the HTML with SSRF protection, size & timeout enforcement
   const { finalUrl, html } = await safeFetchUrl(urlStr);
 
-  return parseHtmlToStructuredContent(html, finalUrl);
+  const content = parseHtmlToStructuredContent(html, finalUrl);
+  console.info(`[Timing] Webpage extraction service completed in ${Math.round(performance.now() - startedAt)}ms.`);
+  return content;
 }
 
 export function parseHtmlToStructuredContent(

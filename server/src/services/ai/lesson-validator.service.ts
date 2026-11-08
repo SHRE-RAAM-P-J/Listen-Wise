@@ -165,16 +165,25 @@ export class LessonValidatorService {
     // 4. Verify chapter source references point to actual source blocks.
     for (const chapter of chapters) {
       if (!chapter.sourceReferences || chapter.sourceReferences.length === 0) {
-        warnings.push(`Chapter "${chapter.title}" has no explicit source block references.`);
+        const message = `Chapter "${chapter.title}" has no explicit source block references.`;
+        warnings.push(message);
+        unsupportedClaims.push({
+          claim: `Unreferenced chapter "${chapter.title}"`,
+          chapterId: chapter.id,
+          reason: message,
+          severity: 'discrepancy',
+        });
         continue;
       }
 
       for (const ref of chapter.sourceReferences) {
-        if (ref.blockId && !validBlockIds.has(ref.blockId)) {
-          const message = `Chapter "${chapter.title}" references source block ID "${ref.blockId}" which does not exist in the source document.`;
+        if (!ref.blockId || !validBlockIds.has(ref.blockId)) {
+          const message = ref.blockId
+            ? `Chapter "${chapter.title}" references source block ID "${ref.blockId}" which does not exist in the source document.`
+            : `Chapter "${chapter.title}" contains a source reference without a source block ID.`;
           warnings.push(message);
           unsupportedClaims.push({
-            claim: `Invalid source reference "${ref.blockId}" in chapter "${chapter.title}"`,
+            claim: `Invalid source reference in chapter "${chapter.title}"`,
             chapterId: chapter.id,
             reason: message,
             severity: 'discrepancy',
@@ -185,7 +194,8 @@ export class LessonValidatorService {
 
     // 5. Unsupported numeric claims are not grounded just because the section title matched.
     for (const chapter of chapters) {
-      const scriptNumbers = chapter.teachingScript.match(/\b\d[\d,]*(?:\.\d+)?%?/g);
+      const chapterClaimsText = [chapter.overview, ...chapter.conceptsCovered, chapter.teachingScript].join(' ');
+      const scriptNumbers = chapterClaimsText.match(/\b\d[\d,]*(?:\.\d+)?%?/g);
       if (scriptNumbers) {
         for (const num of scriptNumbers) {
           const normalized = num.replace(/[,%]/g, '');
@@ -222,7 +232,40 @@ export class LessonValidatorService {
       }
     }
 
-    // 6. Complete Lesson Script Completeness
+    // 6. Report omission risks for source obligations and procedural lists that lexical coverage cannot prove.
+    const completeScriptTokens = meaningfulTokens(fullLessonScript);
+    const criticalSourceMarkers: Array<{ label: string; sourcePattern: RegExp; lessonPattern: RegExp }> = [
+      { label: 'eligibility', sourcePattern: /eligib|qualif/i, lessonPattern: /eligib|qualif/i },
+      { label: 'requirements', sourcePattern: /must|required|requirement|have to|need to/i, lessonPattern: /must|required|requirement|have to|need to|should/i },
+      { label: 'conditions or exceptions', sourcePattern: /unless|except|only if|provided that|subject to/i, lessonPattern: /unless|except|only if|provided that|subject to/i },
+      { label: 'deadlines or timing conditions', sourcePattern: /deadline|due date|no later than|within \d+|before|after/i, lessonPattern: /deadline|due date|no later than|within \d+|before|after/i },
+    ];
+    const sourceBodyBlocks = identifiedDocument.sections.flatMap((section) => section.blocks);
+    for (const block of sourceBodyBlocks) {
+      const blockText = [block.content, ...(block.items || [])].filter(Boolean).join(' ');
+      for (const marker of criticalSourceMarkers) {
+        if (marker.sourcePattern.test(blockText) && !marker.lessonPattern.test(fullLessonScript)) {
+          warnings.push(`A source ${marker.label} detail may not be explained in the generated lesson. Check the cited source section.`);
+        }
+      }
+      for (const item of block.items || []) {
+        const itemTokens = meaningfulTokens(item);
+        if (itemTokens.size < 4) continue;
+        const overlap = [...itemTokens].filter((token) => completeScriptTokens.has(token)).length;
+        if (overlap / itemTokens.size < 0.35) {
+          warnings.push('One or more source list steps may be missing or abbreviated in the generated lesson. Review the original list.');
+          break;
+        }
+      }
+      const sourceDatesAndPercentages = blockText.match(/\b\d{4}\b|\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|\b\d+(?:\.\d+)?%/g) || [];
+      for (const sourceFact of sourceDatesAndPercentages) {
+        if (!fullLessonScript.includes(sourceFact)) {
+          warnings.push(`A source date or percentage (${sourceFact}) may be missing from the generated lesson.`);
+        }
+      }
+    }
+
+    // 7. Complete Lesson Script Completeness
     const completeScriptMissingChapters = chapters.filter(
       (ch) => !fullLessonScript.includes(ch.title) && !fullLessonScript.includes(ch.teachingScript.slice(0, 30)),
     );

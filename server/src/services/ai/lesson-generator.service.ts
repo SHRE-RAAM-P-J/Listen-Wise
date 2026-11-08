@@ -14,6 +14,9 @@ import { PromptBuilderService } from './prompt-builder.service.js';
 import { LessonValidatorService } from './lesson-validator.service.js';
 import { SourceQualityService } from '../extraction/source-quality.service.js';
 import { AppError } from '../../middleware/error-handler.js';
+import { performance } from 'node:perf_hooks';
+
+const SINGLE_PASS_SMALL_DOCUMENT_WORDS = 500;
 
 export interface GenerateLessonOptions {
   provider?: LLMProvider;
@@ -44,51 +47,71 @@ export class LessonGeneratorService {
 
     const teacherSystemInstruction = PromptBuilderService.getTeacherSystemInstruction();
 
-    // 3. Stage 1: Document Understanding & Conceptual Architectural Map
-    console.log(`[LessonGenerator] Analyzing document architecture for: "${document.title}"...`);
-    const understandingPrompt = PromptBuilderService.buildDocumentUnderstandingPrompt(document);
-
-    const understandingRaw = await provider.generateStructuredJSON<any>(
-      understandingPrompt,
-      'JSON matching DocumentUnderstandingSchema',
-      {
-        systemInstruction: teacherSystemInstruction,
-        temperature: 0.1,
-      },
-    );
+    // 3. Stage 1: preserve canonical ordering and avoid an extra model round-trip for small sources.
+    const chunkingStartedAt = performance.now();
+    const chunks = ChunkingService.createChunks(document);
+    console.info(`[Timing] Chunking completed in ${Math.round(performance.now() - chunkingStartedAt)}ms.`);
+    console.log(`[LessonGenerator] Split into ${chunks.length} manageable pedagogical chunks.`);
 
     let understanding: DocumentUnderstanding;
-    try {
-      understanding = DocumentUnderstandingSchema.parse(understandingRaw);
-    } catch (valErr: any) {
-      console.warn('[LessonGenerator] Document understanding schema parse warning, attempting fallback repair:', valErr.message);
-      // Construct fallback with available fields
-      understanding = {
-        subject: understandingRaw?.subject || document.title,
-        purpose: understandingRaw?.purpose || 'Explain technical concepts grounded in the source material',
-        learningObjective: understandingRaw?.learningObjective || `Master the fundamentals of ${document.title}`,
-        mainTopics: Array.isArray(understandingRaw?.mainTopics) && understandingRaw.mainTopics.length > 0
-          ? understandingRaw.mainTopics
-          : [document.title],
-        keyConcepts: Array.isArray(understandingRaw?.keyConcepts) ? understandingRaw.keyConcepts : [],
-        terminology: Array.isArray(understandingRaw?.terminology) ? understandingRaw.terminology : [],
-        relationshipsBetweenConcepts: Array.isArray(understandingRaw?.relationshipsBetweenConcepts) ? understandingRaw.relationshipsBetweenConcepts : [],
-        relationshipsBetweenSections: Array.isArray(understandingRaw?.relationshipsBetweenSections) ? understandingRaw.relationshipsBetweenSections : [],
-        importantExamples: Array.isArray(understandingRaw?.importantExamples) ? understandingRaw.importantExamples : [],
-        importantFormulasOrNumbers: Array.isArray(understandingRaw?.importantFormulasOrNumbers) ? understandingRaw.importantFormulasOrNumbers : [],
-        prerequisites: Array.isArray(understandingRaw?.prerequisites) ? understandingRaw.prerequisites : [],
-      };
+    const contentWordCount = document.sections.reduce(
+      (count, section) => count + ChunkingService.countSectionWords(section),
+      0,
+    );
+    if (contentWordCount <= SINGLE_PASS_SMALL_DOCUMENT_WORDS && chunks.length === 1) {
+      const sourceTopics = document.sections
+        .map((section) => section.heading?.trim())
+        .filter((heading): heading is string => Boolean(heading));
+      understanding = DocumentUnderstandingSchema.parse({
+        subject: document.title,
+        purpose: 'Explain the ideas present in the supplied source.',
+        learningObjective: 'Understand the key points explicitly described in the supplied source.',
+        mainTopics: sourceTopics.length ? sourceTopics.slice(0, 6) : [document.title],
+        keyConcepts: [],
+        terminology: [],
+        relationshipsBetweenConcepts: [],
+        relationshipsBetweenSections: [],
+        importantExamples: [],
+        importantFormulasOrNumbers: [],
+        prerequisites: [],
+      });
+      console.info('[LessonGenerator] Small single-chunk source: skipped separate Gemini understanding request.');
+    } else {
+      const understandingStartedAt = performance.now();
+      console.log(`[LessonGenerator] Analyzing document architecture for: "${document.title}"...`);
+      const understandingPrompt = PromptBuilderService.buildDocumentUnderstandingPrompt(document);
+      const understandingRaw = await provider.generateStructuredJSON<any>(
+        understandingPrompt,
+        'JSON matching DocumentUnderstandingSchema',
+        { systemInstruction: teacherSystemInstruction, temperature: 0.1 },
+      );
+      console.info(`[Timing] Gemini understanding stage completed in ${Math.round(performance.now() - understandingStartedAt)}ms.`);
+      try {
+        understanding = DocumentUnderstandingSchema.parse(understandingRaw);
+      } catch (valErr: any) {
+        console.warn('[LessonGenerator] Document understanding schema parse warning, applying source-title fallback:', valErr.message);
+        understanding = {
+          subject: understandingRaw?.subject || document.title,
+          purpose: understandingRaw?.purpose || 'Explain technical concepts grounded in the source material',
+          learningObjective: understandingRaw?.learningObjective || `Understand the key ideas described in ${document.title}`,
+          mainTopics: Array.isArray(understandingRaw?.mainTopics) && understandingRaw.mainTopics.length > 0 ? understandingRaw.mainTopics : [document.title],
+          keyConcepts: Array.isArray(understandingRaw?.keyConcepts) ? understandingRaw.keyConcepts : [],
+          terminology: Array.isArray(understandingRaw?.terminology) ? understandingRaw.terminology : [],
+          relationshipsBetweenConcepts: Array.isArray(understandingRaw?.relationshipsBetweenConcepts) ? understandingRaw.relationshipsBetweenConcepts : [],
+          relationshipsBetweenSections: Array.isArray(understandingRaw?.relationshipsBetweenSections) ? understandingRaw.relationshipsBetweenSections : [],
+          importantExamples: Array.isArray(understandingRaw?.importantExamples) ? understandingRaw.importantExamples : [],
+          importantFormulasOrNumbers: Array.isArray(understandingRaw?.importantFormulasOrNumbers) ? understandingRaw.importantFormulasOrNumbers : [],
+          prerequisites: Array.isArray(understandingRaw?.prerequisites) ? understandingRaw.prerequisites : [],
+        };
+      }
     }
-
-    // 4. Stage 2: Chunk Document for Manageable Section-by-Section Explanations
-    const chunks = ChunkingService.createChunks(document);
-    console.log(`[LessonGenerator] Split into ${chunks.length} manageable pedagogical chunks.`);
 
     // 5. Stage 3: Section-by-Section Chapter Generation
     const chapters: LessonChapter[] = [];
     let previousChapterTitle: string | undefined;
     let previousTransition: string | undefined;
 
+    const chapterGenerationStartedAt = performance.now();
     for (let cIdx = 0; cIdx < chunks.length; cIdx++) {
       const chunk = chunks[cIdx];
       console.log(`[LessonGenerator] Generating Chapter ${cIdx + 1}/${chunks.length} ("${chunk.suggestedTitle}")...`);
@@ -143,6 +166,7 @@ export class LessonGeneratorService {
     if (chapters.length === 0) {
       throw new AppError('The AI Engine could not produce any teaching chapters for this document.', 500, 'CHAPTER_GENERATION_FAILED');
     }
+    console.info(`[Timing] Lesson generation stage completed in ${Math.round(performance.now() - chapterGenerationStartedAt)}ms.`);
 
     // 6. Stage 4: Compile Complete Pedagogical Lesson Script
     const lessonScriptSections: string[] = [];
@@ -163,7 +187,9 @@ export class LessonGeneratorService {
 
     // 7. Stage 5: Rigorous Source Coverage and Unsupported-Claim Validation
     console.log('[LessonGenerator] Running source coverage and claim validation...');
+    const validationStartedAt = performance.now();
     const validation = LessonValidatorService.validateLesson(document, understanding, chapters);
+    console.info(`[Timing] Lesson validation completed in ${Math.round(performance.now() - validationStartedAt)}ms.`);
     LessonValidatorService.assertPassed(
       validation,
       document.title,

@@ -1,16 +1,17 @@
-import { StructuredContent } from './models/structured-content.js';
+import { StructuredContent, ensureContentIdentifiers } from './models/structured-content.js';
 import { LessonGeneratorService } from './services/ai/lesson-generator.service.js';
 import { MockLLMProvider } from './services/ai/providers/mock.provider.js';
 import { ChunkingService } from './services/ai/chunking.service.js';
 import { LessonValidatorService } from './services/ai/lesson-validator.service.js';
 import { PromptBuilderService } from './services/ai/prompt-builder.service.js';
-import { GeminiProvider } from './services/ai/providers/gemini.provider.js';
+import { GeminiProvider, calculateRetryDelayMs } from './services/ai/providers/gemini.provider.js';
 import { parseHtmlToStructuredContent } from './services/extraction/html-extractor.js';
 import { extractFromPdfBuffer } from './services/extraction/pdf-extractor.js';
 import { extractFromPastedText } from './services/extraction/text-extractor.js';
 import { generateTestPdfBuffer } from './test-pdf-generator.js';
 import { AppError } from './middleware/error-handler.js';
 import { config } from './config.js';
+import { classifyApiFailure } from './middleware/error-handler.js';
 
 let passed = 0;
 let failed = 0;
@@ -430,6 +431,27 @@ def scaled_dot_product(q, k, v, d_k):
   // ─────────────────────────────────────────────────────────────
   // 14. Source grounding and output gates
   console.log('\n--- Source Grounding Generation Gates ---');
+  const shortPastedSource = extractFromPastedText(
+    'Honeybees communicate the location of food through a waggle dance. The direction and duration of the dance help other bees find the flowers.',
+    { customTitle: 'Honeybee Communication' },
+  );
+  const shortPastedIds = ensureContentIdentifiers(shortPastedSource).sections.flatMap((section) => section.blocks.map((block) => block.id!));
+  let shortPastedCalls = 0;
+  const shortPastedProvider = new MockLLMProvider(() => {
+    shortPastedCalls++;
+    return {
+      id: 'chapter-1',
+      title: 'The Waggle Dance',
+      overview: 'How honeybees communicate food locations.',
+      conceptsCovered: ['waggle dance', 'food location'],
+      teachingScript: 'Honeybees communicate the location of food through a waggle dance. The direction and duration of the dance help other bees find the flowers.',
+      transitionToNext: '',
+      sourceReferences: shortPastedIds.map((blockId) => ({ blockId })),
+    };
+  });
+  const shortPastedLesson = await LessonGeneratorService.generateLesson(shortPastedSource, { provider: shortPastedProvider });
+  assert(shortPastedCalls === 1 && shortPastedLesson.validation.sourceCoverage === 'passed', 'Short pasted source uses one chapter call and retains source validation');
+
   const shortUrlSource: StructuredContent = {
     title: 'The Investment Guide',
     source: { type: 'url', url: 'https://unstop.com/resources/the-investment-guide', extractedAt: new Date().toISOString() },
@@ -449,7 +471,7 @@ def scaled_dot_product(q, k, v, d_k):
     shortUrlError = err;
   }
   assert(
-    shortUrlError?.code === 'SOURCE_CONTENT_UNAVAILABLE' &&
+    shortUrlError?.code === 'SOURCE_REQUIRES_JAVASCRIPT' &&
       shortUrlError.message.includes('The Investment Guide') &&
       shortUrlError.message.includes('https://unstop.com/resources/the-investment-guide') &&
       shortUrlProviderCalls === 0,
@@ -527,6 +549,51 @@ def scaled_dot_product(q, k, v, d_k):
     unsupportedClaimBlocked = err.code === 'SOURCE_VALIDATION_FAILED';
   }
   assert(unsupportedClaimBlocked, 'Lesson validation rejects unsupported claims before lesson/audio completion');
+
+  const unreferencedValidation = LessonValidatorService.validateLesson(
+    groundedSource,
+    understandingForTest,
+    [{ ...unsupportedClaimChapter, sourceReferences: [] }],
+  );
+  let unreferencedChapterBlocked = false;
+  try {
+    LessonValidatorService.assertPassed(unreferencedValidation, groundedSource.title);
+  } catch (err: any) {
+    unreferencedChapterBlocked = err.code === 'SOURCE_VALIDATION_FAILED';
+  }
+  assert(unreferencedChapterBlocked, 'A chapter without any source block citation cannot pass validation');
+  const malformedReferenceValidation = LessonValidatorService.validateLesson(
+    groundedSource,
+    understandingForTest,
+    [{ ...unsupportedClaimChapter, sourceReferences: [{ sectionTitle: groundedSource.title }] }],
+  );
+  let malformedReferenceBlocked = false;
+  try {
+    LessonValidatorService.assertPassed(malformedReferenceValidation, groundedSource.title);
+  } catch (err: any) {
+    malformedReferenceBlocked = err.code === 'SOURCE_VALIDATION_FAILED';
+  }
+  assert(malformedReferenceBlocked, 'Section-only citation metadata without a source block ID cannot pass validation');
+
+  const obligationsSource = extractFromPastedText(
+    'Eligible applicants must submit the registration form by March 15, 2027. Required documents include proof of identity and residence.\n\n1. Upload the fully completed application form to the official portal.\n2. Confirm your submission and save the receipt for future reference.',
+    { customTitle: 'Registration Requirements' },
+  );
+  const incompleteObligations = LessonValidatorService.validateLesson(
+    obligationsSource,
+    understandingForTest,
+    [{
+      ...unsupportedClaimChapter,
+      teachingScript: 'The source describes a registration process.',
+      sourceReferences: [{ blockId: ensureContentIdentifiers(obligationsSource).sections[0].blocks[0].id!, sectionTitle: 'Registration Requirements' }],
+    }],
+  );
+  assert(
+    incompleteObligations.warnings.some((warning) => warning.includes('requirements detail')) &&
+      incompleteObligations.warnings.some((warning) => warning.includes('source date or percentage')) &&
+      incompleteObligations.warnings.some((warning) => warning.includes('source list steps')),
+    'Validation warns when dates, requirements, and source list steps may have been omitted',
+  );
   let unsupportedGenerationBlocked = false;
   try {
     const unsupportedProvider = new MockLLMProvider(async (prompt: string) =>
@@ -679,6 +746,41 @@ def scaled_dot_product(q, k, v, d_k):
             : message.includes('rejected the request');
       assert(code === testCase.expected && calls === 1 && messageIsSpecific, `${testCase.expected} is clear and not retried`);
     }
+
+    let quotaCalls = 0;
+    const quotaProvider = makeGeminiTestProvider(async () => {
+      quotaCalls++;
+      throw statusError(429, 'Project quota exceeded');
+    });
+    let quotaCode = '';
+    try {
+      await quotaProvider.generateText('Do not retry an exhausted project quota.');
+    } catch (err: any) {
+      quotaCode = err.code;
+    }
+    assert(quotaCode === 'GEMINI_QUOTA_EXHAUSTED' && quotaCalls === 1, 'Quota exhaustion is distinct from rate limiting and is not retried');
+
+    let permissionCalls = 0;
+    const permissionProvider = makeGeminiTestProvider(async () => {
+      permissionCalls++;
+      throw statusError(403, 'PERMISSION_DENIED: model access not granted');
+    });
+    let permissionCode = '';
+    try {
+      await permissionProvider.generateText('Do not retry a permanent permission failure.');
+    } catch (err: any) {
+      permissionCode = err.code;
+    }
+    assert(permissionCode === 'GEMINI_PERMISSION_DENIED' && permissionCalls === 1, 'Gemini permission denial is distinct and not retried');
+    assert(
+      classifyApiFailure('GEMINI_SERVICE_UNAVAILABLE', 503).failureType === 'temporary' &&
+        classifyApiFailure('INVALID_API_KEY', 401).failureType === 'permanent',
+      'API classifies provider failures as temporary or permanent for frontend recovery',
+    );
+    assert(
+      calculateRetryDelayMs(0, 500, () => 0.5) === 625 && calculateRetryDelayMs(1, 500, () => 0.5) === 1250,
+      'Gemini retry delay applies bounded exponential backoff with jitter',
+    );
   } finally {
     Object.assign(runtimeConfig, originalGeminiConfig);
   }

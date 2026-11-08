@@ -183,6 +183,23 @@ export interface SafeFetchResult {
   contentType: string;
 }
 
+export function describeSafeFetchConnectionError(url: URL, error: unknown): AppError {
+  const err = error as { code?: string; cause?: { code?: string } };
+  const networkCode = String(err?.code || err?.cause?.code || '').toUpperCase();
+  if (url.protocol === 'https:' && /CERT|TLS|SSL|SELF_SIGNED|UNABLE_TO_VERIFY/.test(networkCode)) {
+    return new AppError(
+      'The website HTTPS certificate could not be verified. Check the address or open the page in Chrome, press Ctrl+P, choose Save as PDF, and upload the PDF; you can also paste the article text.',
+      502,
+      'HTTPS_CERTIFICATE_ERROR',
+    );
+  }
+  return new AppError(
+    `Could not securely connect to ${url.hostname}. Check the web address and connection, or open the page in Chrome, press Ctrl+P, choose Save as PDF, and upload it; you can also paste the article text.`,
+    502,
+    'NETWORK_ERROR',
+  );
+}
+
 /**
  * Safely fetches an HTTP(S) URL following redirects, validating every hop against SSRF,
  * enforcing timeouts and response byte limits.
@@ -221,11 +238,7 @@ export async function safeFetchUrl(
           'FETCH_TIMEOUT',
         );
       }
-      throw new AppError(
-        `Failed to connect to ${validatedUrl.hostname}: ${err.message || 'Network error'}`,
-        502,
-        'NETWORK_ERROR',
-      );
+      throw describeSafeFetchConnectionError(validatedUrl, err);
     }
 
     clearTimeout(timeout);
@@ -250,8 +263,28 @@ export async function safeFetchUrl(
     }
 
     if (!res.ok) {
+      if (res.status === 401) {
+        throw new AppError(
+          'This website requires sign-in. Open the page in Chrome where you can access it, press Ctrl+P, choose Save as PDF, and upload that PDF; or paste the article text.',
+          422,
+          'SOURCE_LOGIN_REQUIRED',
+        );
+      }
+      if (res.status === 403 || res.status === 429) {
+        throw new AppError(
+          'This website denied automated access and may require sign-in or anti-bot verification. Open it in Chrome, press Ctrl+P, choose Save as PDF, and upload that PDF; or paste the article text.',
+          422,
+          'SOURCE_AUTOMATED_ACCESS_BLOCKED',
+        );
+      }
+      if (res.status >= 500) {
+        throw new AppError('The website is temporarily unavailable. Try again later, or save the page as a PDF in Chrome and upload it.', 503, 'WEBSITE_TEMPORARILY_UNAVAILABLE');
+      }
+      if (res.status === 404 || res.status === 410) {
+        throw new AppError('This webpage was not found. Check the URL or open the page in Chrome and save it as a PDF.', 404, 'WEBSITE_PAGE_NOT_FOUND');
+      }
       throw new AppError(
-        `Failed to retrieve page: HTTP ${res.status} (${res.statusText || 'Error'})`,
+        `The website returned HTTP ${res.status}. Check that the address is correct and publicly accessible, or paste the article text.`,
         res.status >= 400 && res.status < 500 ? 400 : 502,
         'HTTP_STATUS_ERROR',
       );

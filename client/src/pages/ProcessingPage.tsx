@@ -9,6 +9,9 @@ interface ProcessingPageProps {
   lesson: GeneratedLesson | null;
   error: string | null;
   failurePoint: FailurePoint;
+  failureCode: string | null;
+  failureType: 'temporary' | 'permanent' | 'source' | 'request' | null;
+  failureRetryable: boolean;
   busy: boolean;
   onRetry: () => void;
   onOpenLesson: () => void;
@@ -35,6 +38,9 @@ export function ProcessingPage({
   lesson,
   error,
   failurePoint,
+  failureCode,
+  failureType,
+  failureRetryable,
   busy,
   onRetry,
   onOpenLesson,
@@ -46,7 +52,11 @@ export function ProcessingPage({
     active.length > 0
       ? active.map((stage) => stage.label).join(' · ')
       : error
-        ? 'Something needs attention'
+        ? failurePoint === 'lesson' && failureType === 'temporary'
+          ? 'Gemini is temporarily unavailable'
+          : failurePoint === 'lesson' && failureType === 'permanent'
+            ? 'Gemini configuration needs attention'
+            : 'Something needs attention'
         : 'Preparing your lesson';
 
   const readingPair = stages.filter((stage) => stage.id === 'reading' || stage.id === 'extracting');
@@ -146,10 +156,27 @@ export function ProcessingPage({
             {failurePoint === 'audio'
               ? 'Audio generation failed'
               : failurePoint === 'lesson'
-                ? 'The lesson could not be created'
+                ? failureType === 'temporary'
+                  ? 'Temporary Gemini service issue'
+                  : failureType === 'permanent'
+                    ? 'Gemini request cannot succeed with the current configuration'
+                    : 'The lesson could not be created'
                 : 'The source could not be read'}
           </p>
           <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-rose-900">{error}</p>
+          {failurePoint === 'lesson' && failureType === 'temporary' && (
+            <p className="mt-2 text-sm leading-6 text-rose-900">
+              This looks temporary{failureRetryable ? ' and can be retried' : ''}. Your extracted source is still loaded, so retrying will not repeat PDF extraction or OCR.
+            </p>
+          )}
+          {failurePoint === 'lesson' && failureType === 'permanent' && (
+            <p className="mt-2 text-sm leading-6 text-rose-900">
+              Check the Gemini key permissions, model access, quota, or request configuration shown above. Your extracted source is still loaded; retry after correcting the server configuration.
+            </p>
+          )}
+          {failurePoint === 'source' && failureCode === 'SOURCE_LOGIN_REQUIRED' && (
+            <p className="mt-2 text-sm leading-6 text-rose-900">After opening the page in Chrome, press Ctrl+P, choose Save as PDF, then upload the saved PDF. You can also paste the text.</p>
+          )}
           <div className="mt-4 flex flex-col gap-2 sm:flex-row">
             <button
               type="button"

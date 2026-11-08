@@ -14,11 +14,19 @@ export interface ApiErrorResponse {
   error: {
     message: string;
     code?: string;
+    failureType?: 'temporary' | 'permanent' | 'source' | 'request';
+    retryable?: boolean;
   };
 }
 
 export class ApiRequestError extends Error {
-  constructor(message: string, public readonly code?: string, public readonly status?: number) {
+  constructor(
+    message: string,
+    public readonly code?: string,
+    public readonly status?: number,
+    public readonly failureType?: ApiErrorResponse['error']['failureType'],
+    public readonly retryable = false,
+  ) {
     super(message);
     this.name = 'ApiRequestError';
   }
@@ -28,16 +36,20 @@ async function handleResponse<T>(res: Response): Promise<T> {
   if (!res.ok) {
     let errorMessage = `Request failed with HTTP ${res.status}`;
     let errorCode: string | undefined;
+    let failureType: ApiErrorResponse['error']['failureType'];
+    let retryable = false;
     try {
       const errJson = (await res.json()) as ApiErrorResponse;
       if (errJson?.error?.message) {
         errorMessage = errJson.error.message;
       }
       errorCode = errJson?.error?.code;
+      failureType = errJson?.error?.failureType;
+      retryable = Boolean(errJson?.error?.retryable);
     } catch {
       // ignore JSON parse error
     }
-    throw new ApiRequestError(errorMessage, errorCode, res.status);
+    throw new ApiRequestError(errorMessage, errorCode, res.status, failureType, retryable);
   }
   const json = await res.json();
   return json.data !== undefined ? json.data : json;

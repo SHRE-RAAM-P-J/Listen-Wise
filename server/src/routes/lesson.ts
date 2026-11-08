@@ -4,6 +4,7 @@ import { extractFromUrl } from '../services/extraction/html-extractor.js';
 import { extractFromPastedText } from '../services/extraction/text-extractor.js';
 import { StructuredContent } from '../models/structured-content.js';
 import { AppError } from '../middleware/error-handler.js';
+import { performance } from 'node:perf_hooks';
 
 const router: Router = Router();
 
@@ -31,7 +32,7 @@ router.post('/generate', async (req: Request, res: Response, next: NextFunction)
         );
       }
     } else if (url && typeof url === 'string') {
-      console.log(`[LessonRoute] Extracting URL first: ${url}`);
+      console.log('[LessonRoute] Extracting URL source.');
       targetDocument = await extractFromUrl(url.trim());
     } else if (text && typeof text === 'string') {
       console.log('[LessonRoute] Extracting text content first');
@@ -45,7 +46,13 @@ router.post('/generate', async (req: Request, res: Response, next: NextFunction)
     }
 
     console.log(`[LessonRoute] Generating lesson for: "${targetDocument.title}" (~${targetDocument.wordCount} words)`);
-    const lesson = await LessonGeneratorService.generateLesson(targetDocument);
+    const generationStartedAt = performance.now();
+    let lesson;
+    try {
+      lesson = await LessonGeneratorService.generateLesson(targetDocument);
+    } finally {
+      console.info(`[Timing] Lesson generation request completed in ${Math.round(performance.now() - generationStartedAt)}ms.`);
+    }
 
     res.json({
       success: true,

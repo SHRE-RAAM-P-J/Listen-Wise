@@ -6,6 +6,7 @@ import { extractFromPastedText } from '../services/extraction/text-extractor.js'
 import { config } from '../config.js';
 import { AppError } from '../middleware/error-handler.js';
 import { SourceQualityService } from '../services/extraction/source-quality.service.js';
+import { performance } from 'node:perf_hooks';
 
 const router: Router = Router();
 
@@ -30,6 +31,7 @@ const upload = multer({
  * Extracts structured content from a public webpage URL.
  */
 router.post('/url', async (req: Request, res: Response, next: NextFunction) => {
+  const startedAt = performance.now();
   try {
     const { url } = req.body;
     if (!url || typeof url !== 'string' || !url.trim()) {
@@ -44,6 +46,8 @@ router.post('/url', async (req: Request, res: Response, next: NextFunction) => {
     });
   } catch (err) {
     next(err);
+  } finally {
+    console.info(`[Timing] URL extraction request completed in ${Math.round(performance.now() - startedAt)}ms.`);
   }
 });
 
@@ -55,6 +59,7 @@ router.post(
   '/pdf',
   upload.single('file'),
   async (req: Request, res: Response, next: NextFunction) => {
+    const startedAt = performance.now();
     try {
       if (!req.file || !req.file.buffer) {
         throw new AppError('No PDF file uploaded. Please upload a file with field "file".', 400, 'NO_FILE_UPLOADED');
@@ -70,6 +75,8 @@ router.post(
       });
     } catch (err) {
       next(err);
+    } finally {
+      console.info(`[Timing] PDF extraction request completed in ${Math.round(performance.now() - startedAt)}ms.`);
     }
   },
 );
@@ -79,6 +86,7 @@ router.post(
  * Extracts structured content from raw pasted text.
  */
 router.post('/text', async (req: Request, res: Response, next: NextFunction) => {
+  const startedAt = performance.now();
   try {
     const { text, title } = req.body;
     if (!text || typeof text !== 'string' || !text.trim()) {
@@ -93,6 +101,8 @@ router.post('/text', async (req: Request, res: Response, next: NextFunction) => 
     });
   } catch (err) {
     next(err);
+  } finally {
+    console.info(`[Timing] Pasted-text extraction request completed in ${Math.round(performance.now() - startedAt)}ms.`);
   }
 });
 

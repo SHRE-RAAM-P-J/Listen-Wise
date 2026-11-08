@@ -103,7 +103,7 @@ export function LessonViewer({
         </p>
         {lesson.validation && (
           <p className="mt-2 text-sm text-stone-500">
-            Source coverage {lesson.validation.sourceCoverage} ({coverage}%).
+            Estimated section coverage {coverage}% ({lesson.validation.sourceCoverage}). This does not guarantee every source detail is included.
           </p>
         )}
       </header>

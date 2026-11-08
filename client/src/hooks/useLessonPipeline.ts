@@ -46,6 +46,9 @@ export function useLessonPipeline() {
   const [lesson, setLesson] = useState<GeneratedLesson | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [failurePoint, setFailurePoint] = useState<FailurePoint>(null);
+  const [failureCode, setFailureCode] = useState<string | null>(null);
+  const [failureType, setFailureType] = useState<'temporary' | 'permanent' | 'source' | 'request' | null>(null);
+  const [failureRetryable, setFailureRetryable] = useState(false);
   const [audioStatus, setAudioStatus] = useState<AudioStatus>('missing');
   const [audioError, setAudioError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -73,6 +76,12 @@ export function useLessonPipeline() {
     setBusy(true);
     setError(null);
     setFailurePoint(null);
+    setFailureCode(null);
+    setFailureType(null);
+    setFailureRetryable(false);
+    setFailureCode(null);
+    setFailureType(null);
+    setFailureRetryable(false);
     return { id, signal: controller.signal };
   };
 
@@ -85,7 +94,14 @@ export function useLessonPipeline() {
     try {
       let extracted = contentRef.current;
       if (startAt === 'extract') {
-        setStages(stagesFor(['reading', 'extracting'], []));
+        const extractionStages = stagesFor(['reading', 'extracting'], []);
+        if (mode === 'pdf') {
+          const extractionStage = extractionStages.find((stage) => stage.id === 'extracting');
+          if (extractionStage) {
+            extractionStage.description = 'Checking for selectable text and recognizing scanned pages with OCR. Large or low-quality scans may take longer.';
+          }
+        }
+        setStages(extractionStages);
         rememberContent(null);
         rememberLesson(null);
         setAudioStatus('missing');
@@ -137,6 +153,9 @@ export function useLessonPipeline() {
           setAudioError(message);
           setError(message);
           setFailurePoint('audio');
+          setFailureCode('TTS_PARTIAL_FAILURE');
+          setFailureType('temporary');
+          setFailureRetryable(true);
           return;
         }
         setStages(stagesFor([], ['reading', 'extracting', 'understanding', 'chapters', 'audio']));
@@ -145,10 +164,14 @@ export function useLessonPipeline() {
         setScreen('lesson');
       } catch (err: unknown) {
         if (isAbortError(err) || !isCurrent(id)) return;
+        const requestError = err instanceof ApiRequestError ? err : null;
         setStages(stagesFor([], ['reading', 'extracting', 'understanding', 'chapters'], ['audio']));
         setAudioStatus('failed');
         setAudioError(toUserMessage(err, 'Audio generation failed.'));
         setFailurePoint('audio');
+        setFailureCode(requestError?.code || 'TTS_FAILURE');
+        setFailureType(requestError?.failureType || 'temporary');
+        setFailureRetryable(requestError?.retryable ?? true);
         setError(toUserMessage(err, 'Audio generation failed.'));
       }
     } catch (err: unknown) {
@@ -156,6 +179,10 @@ export function useLessonPipeline() {
       const message = toUserMessage(err, 'The lesson could not be created.');
       setError(message);
       const errorCode = err instanceof ApiRequestError ? err.code : undefined;
+      const requestError = err instanceof ApiRequestError ? err : null;
+      setFailureCode(errorCode || null);
+      setFailureType(requestError?.failureType || null);
+      setFailureRetryable(requestError?.retryable ?? false);
       if (startAt === 'extract' && !contentRef.current) {
         setStages(stagesFor([], [], ['reading', 'extracting']));
         setFailurePoint('source');
@@ -234,6 +261,9 @@ export function useLessonPipeline() {
         setAudioStatus('failed');
         setAudioError('Some chapters did not finish generating audio.');
         setFailurePoint('audio');
+        setFailureCode('TTS_PARTIAL_FAILURE');
+        setFailureType('temporary');
+        setFailureRetryable(true);
         return;
       }
       setAudioStatus('ready');
@@ -241,9 +271,13 @@ export function useLessonPipeline() {
       setStages(stagesFor([], ['reading', 'extracting', 'understanding', 'chapters', 'audio']));
     } catch (err: unknown) {
       if (isAbortError(err) || !isCurrent(id)) return;
+      const requestError = err instanceof ApiRequestError ? err : null;
       setAudioStatus('failed');
       setAudioError(toUserMessage(err, 'Audio generation failed.'));
       setFailurePoint('audio');
+      setFailureCode(requestError?.code || 'TTS_FAILURE');
+      setFailureType(requestError?.failureType || 'temporary');
+      setFailureRetryable(requestError?.retryable ?? true);
     } finally {
       if (isCurrent(id)) setBusy(false);
     }
@@ -264,6 +298,9 @@ export function useLessonPipeline() {
     rememberLesson(null);
     setError(null);
     setFailurePoint(null);
+    setFailureCode(null);
+    setFailureType(null);
+    setFailureRetryable(false);
     setAudioStatus('missing');
     setAudioError(null);
     setValidationMessage(null);
@@ -284,6 +321,9 @@ export function useLessonPipeline() {
     rememberLesson(null);
     setError(null);
     setFailurePoint(null);
+    setFailureCode(null);
+    setFailureType(null);
+    setFailureRetryable(false);
     setAudioStatus('missing');
     setAudioError(null);
     setValidationMessage(null);
@@ -302,6 +342,9 @@ export function useLessonPipeline() {
     lesson,
     error,
     failurePoint,
+    failureCode,
+    failureType,
+    failureRetryable,
     audioStatus,
     audioError,
     busy,

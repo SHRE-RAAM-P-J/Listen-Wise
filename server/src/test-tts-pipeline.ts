@@ -3,6 +3,7 @@ import { GnaniTtsService } from './services/tts/gnani-tts.service.js';
 import { WavUtils } from './services/tts/wav-utils.js';
 import { TempStorageService } from './services/storage/temp-storage.service.js';
 import { Lesson, LessonChapter } from './models/lesson.js';
+import { config } from './config.js';
 
 let passed = 0;
 let failed = 0;
@@ -187,6 +188,22 @@ async function runPhase3Tests() {
     if (err.code === 'MISSING_GNANI_API_KEY') missingKeyCaught = true;
   }
   assert(missingKeyCaught, 'Throws clean AppError(503) when GNANI_API_KEY is missing');
+
+  const runtimeConfig = config as unknown as { gnaniApiKey: string };
+  const originalTtsKey = runtimeConfig.gnaniApiKey;
+  const originalFetch = globalThis.fetch;
+  let providerResponseSanitized = false;
+  try {
+    runtimeConfig.gnaniApiKey = 'test-only-key';
+    (globalThis as any).fetch = async () => new Response('sensitive-provider-response', { status: 503 });
+    await GnaniTtsService.synthesizeTextSegment('Test a safe provider error.', { mockMode: false });
+  } catch (err: any) {
+    providerResponseSanitized = err.code === 'TTS_SERVICE_ERROR' && !err.message.includes('sensitive-provider-response');
+  } finally {
+    runtimeConfig.gnaniApiKey = originalTtsKey;
+    globalThis.fetch = originalFetch;
+  }
+  assert(providerResponseSanitized, 'TTS service failures are actionable without exposing provider response bodies');
 
   // Test non-existent audio 404
   let notFoundCaught = false;

@@ -1,7 +1,7 @@
 import { extractFromPastedText } from './services/extraction/text-extractor.js';
 import { extractFromPdfBuffer } from './services/extraction/pdf-extractor.js';
 import { parseHtmlToStructuredContent, extractFromUrl } from './services/extraction/html-extractor.js';
-import { validateUrlSafety } from './utils/url-security.js';
+import { validateUrlSafety, describeSafeFetchConnectionError } from './utils/url-security.js';
 import { generateTestPdfBuffer } from './test-pdf-generator.js';
 import { SourceQualityService } from './services/extraction/source-quality.service.js';
 import { StructuredContent } from './models/structured-content.js';
@@ -141,6 +141,14 @@ For more details, see https://deeplearningbook.org
     }
     assert(blocked, `Blocks ${item.reason} (${item.url})`);
   }
+  const tlsRecovery = describeSafeFetchConnectionError(
+    new URL('https://example.com/article'),
+    Object.assign(new Error('certificate validation failed'), { code: 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' }),
+  );
+  assert(
+    tlsRecovery.code === 'HTTPS_CERTIFICATE_ERROR' && tlsRecovery.message.includes('Ctrl+P') && tlsRecovery.message.includes('paste the article text'),
+    'Explains invalid HTTPS certificate recovery without exposing low-level TLS details',
+  );
 
   // ─────────────────────────────────────────────────────────────
   // 4. WEBPAGE EXTRACTION WITH READABILITY & CHEERIO
@@ -233,18 +241,27 @@ For more details, see https://deeplearningbook.org
     {
       name: '13-word loading placeholder',
       body: 'The investment guide is loading. Please wait while the page prepares its full content for you.',
+      code: 'SOURCE_REQUIRES_JAVASCRIPT',
     },
     {
       name: 'browser compatibility placeholder',
       body: 'Your browser is not supported. Please update your browser to read this investment guide.',
+      code: 'SOURCE_BROWSER_INCOMPATIBLE',
     },
     {
       name: 'anti-bot blocked page',
       body: 'Access denied. Unusual traffic was detected. Verify that you are human before continuing.',
+      code: 'SOURCE_AUTOMATED_ACCESS_BLOCKED',
     },
     {
       name: 'cookie consent page',
       body: 'We use cookies to improve this site. Accept all cookies or update cookie preferences to continue.',
+      code: 'SOURCE_CONTENT_UNAVAILABLE',
+    },
+    {
+      name: 'login-protected page',
+      body: 'Sign-in required. Please sign in to continue reading this private investment guide.',
+      code: 'SOURCE_LOGIN_REQUIRED',
     },
   ];
   for (const fixture of rejectedUrlFixtures) {
@@ -257,10 +274,10 @@ For more details, see https://deeplearningbook.org
     const error = rejection as { code?: string; message?: string } | undefined;
     assert(
       Boolean(
-        error?.code === 'SOURCE_CONTENT_UNAVAILABLE' &&
+        error?.code === fixture.code &&
           error.message?.includes('The Investment Guide') &&
           error.message?.includes('https://unstop.com/resources/the-investment-guide') &&
-          error.message?.includes('pasting the article text or uploading a PDF'),
+          error.message?.includes('paste the article text'),
       ),
       `Rejects ${fixture.name} and preserves title, URL, and recovery guidance`,
     );
