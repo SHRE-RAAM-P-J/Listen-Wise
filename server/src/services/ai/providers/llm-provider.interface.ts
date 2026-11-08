@@ -24,7 +24,7 @@ export interface LLMProvider {
   /** Identifier name of the provider (e.g. 'gemini', 'mock'). */
   readonly name: string;
 
-  /** Configured model name (e.g. 'gemini-2.5-flash'). */
+  /** Configured model name (e.g. 'gemini-3.8-flash'). */
   readonly modelName: string;
 
   /** Returns true if required API credentials are present in the environment. */

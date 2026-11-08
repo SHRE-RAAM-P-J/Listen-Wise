@@ -28,6 +28,7 @@ export default {
           'Roboto',
           'sans-serif',
         ],
+        serif: ['Newsreader', 'Georgia', 'serif'],
       },
     },
   },

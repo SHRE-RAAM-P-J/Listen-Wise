@@ -88,7 +88,8 @@ NODE_ENV=development
 # Google Gemini API (Phase 2: AI Understanding Engine)
 # Get a key at: https://aistudio.google.com/
 GEMINI_API_KEY=your_actual_gemini_api_key_here
-GEMINI_MODEL=gemini-2.5-flash
+GEMINI_MODEL=gemini-3.8-flash
+AI_TIMEOUT_MS=90000
 
 # Gnani AI Timbre TTS (Phase 3: Speech Synthesis)
 # Endpoint: https://api.vachana.ai/api/v1/tts/inference

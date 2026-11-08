@@ -12,7 +12,7 @@ export const config = {
 
   // LLM Engine (Phase 2)
   geminiApiKey: process.env.GEMINI_API_KEY || '',
-  geminiModel: process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+  geminiModel: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
 
   // TTS Engine (Phase 3 future)
   gnaniApiKey: process.env.GNANI_API_KEY || '',
@@ -25,6 +25,7 @@ export const config = {
   // Document Chunking & AI Processing Limits
   maxDocumentWords: parseInt(process.env.MAX_DOCUMENT_WORDS || '40000', 10),
   targetChunkWords: parseInt(process.env.TARGET_CHUNK_WORDS || '1800', 10),
+  // Gemini retries are bounded in its provider; this shared setting remains for TTS.
   maxRetries: parseInt(process.env.AI_MAX_RETRIES || '2', 10),
-  requestTimeoutMs: parseInt(process.env.AI_TIMEOUT_MS || '45000', 10),
+  requestTimeoutMs: parseInt(process.env.AI_TIMEOUT_MS || '90000', 10),
 } as const;

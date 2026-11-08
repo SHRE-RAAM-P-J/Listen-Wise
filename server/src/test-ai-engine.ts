@@ -427,7 +427,147 @@ def scaled_dot_product(q, k, v, d_k):
   assert(foundBadRefWarning, 'Detects references to non-existent source block IDs and logs warnings');
 
   // ─────────────────────────────────────────────────────────────
-  // 14. OPTIONAL LIVE GEMINI INTEGRATION
+  // 14. GEMINI TIMEOUT, RETRY & ERROR HANDLING
+  console.log('\n--- Gemini Provider: Timeout, Retry & Error Handling ---');
+  const runtimeConfig = config as unknown as {
+    geminiApiKey: string;
+    geminiModel: string;
+    requestTimeoutMs: number;
+    maxRetries: number;
+  };
+  const originalGeminiConfig = {
+    geminiApiKey: runtimeConfig.geminiApiKey,
+    geminiModel: runtimeConfig.geminiModel,
+    requestTimeoutMs: runtimeConfig.requestTimeoutMs,
+    maxRetries: runtimeConfig.maxRetries,
+  };
+  Object.assign(runtimeConfig, {
+    geminiApiKey: 'unit-test-key',
+    geminiModel: 'configured-test-model',
+    requestTimeoutMs: 90000,
+    maxRetries: 5,
+  });
+
+  const makeGeminiTestProvider = (handler: (request: any) => Promise<any>) => {
+    const provider = new GeminiProvider();
+    (provider as any).client = { models: { generateContent: handler } };
+    return provider;
+  };
+  const statusError = (status: number, message: string) => Object.assign(new Error(message), { status });
+  const abortError = () => Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' });
+
+  try {
+    let generationCalls = 0;
+    const modelRequests: any[] = [];
+    const retryingLessonProvider = makeGeminiTestProvider(async (request) => {
+      generationCalls++;
+      modelRequests.push(request);
+      if (generationCalls === 1) throw abortError();
+      const prompt = String(request.contents);
+      if (prompt.includes('Carefully analyse the following document')) {
+        return {
+          text: JSON.stringify({
+            subject: 'Transformer architecture',
+            purpose: 'Explain attention mechanisms',
+            learningObjective: 'Understand attention and its efficiency',
+            mainTopics: ['Attention'],
+          }),
+        };
+      }
+      const chunkMatch = prompt.match(/Create a complete, engaging teaching chapter for Chunk (\d+) of (\d+)/);
+      const chunkIndex = Number(chunkMatch?.[1] || 1);
+      return {
+        text: JSON.stringify({
+          id: `chapter-${chunkIndex}`,
+          title: `Attention concept ${chunkIndex}`,
+          overview: 'An explanation of attention.',
+          conceptsCovered: ['Attention'],
+          teachingScript: 'Attention combines information from the source in a useful way.',
+          transitionToNext: '',
+          sourceReferences: [],
+        }),
+      };
+    });
+    const retryingLesson = await LessonGeneratorService.generateLesson(articleCCR, {
+      provider: retryingLessonProvider,
+    });
+    const expectedChapterCount = ChunkingService.createChunks(articleCCR).length;
+    const uniqueChapterIds = new Set(retryingLesson.chapters.map((chapter) => chapter.id));
+    assert(
+      generationCalls === expectedChapterCount + 2 && retryingLesson.chapters.length === expectedChapterCount && uniqueChapterIds.size === expectedChapterCount,
+      `A timeout retry yields one lesson with ${expectedChapterCount} unique chapters (no duplicate chapter records)`,
+    );
+    assert(
+      retryingLessonProvider.modelName === 'configured-test-model' &&
+        modelRequests.every((request) => request.model === 'configured-test-model') &&
+        modelRequests.every((request) => request.config?.httpOptions?.timeout === 90000) &&
+        modelRequests.every((request) => request.config?.httpOptions?.retryOptions?.attempts === 1),
+      'Uses configured model and 90-second SDK timeout with SDK retries disabled',
+    );
+
+    let timeoutCalls = 0;
+    const timeoutProvider = makeGeminiTestProvider(async () => {
+      timeoutCalls++;
+      throw abortError();
+    });
+    let timeoutCode = '';
+    try {
+      await timeoutProvider.generateText('A request that will time out.');
+    } catch (err: any) {
+      timeoutCode = err.code;
+    }
+    assert(timeoutCode === 'AI_TIMEOUT' && timeoutCalls === 2, 'Timeout is retried once then reported as a timeout');
+
+    let rateLimitCalls = 0;
+    const rateLimitProvider = makeGeminiTestProvider(async () => {
+      rateLimitCalls++;
+      if (rateLimitCalls === 1) throw statusError(429, 'Resource exhausted');
+      return { text: 'Recovered after rate limiting.' };
+    });
+    const rateLimitResult = await rateLimitProvider.generateText('Retry a rate-limited request.');
+    assert(rateLimitResult.text.includes('Recovered') && rateLimitCalls === 2, 'Rate-limit errors receive one retry');
+
+    let serverErrorCalls = 0;
+    const serverErrorProvider = makeGeminiTestProvider(async () => {
+      serverErrorCalls++;
+      if (serverErrorCalls === 1) throw statusError(503, 'Service unavailable');
+      return { text: 'Recovered after service error.' };
+    });
+    const serverErrorResult = await serverErrorProvider.generateText('Retry a server error.');
+    assert(serverErrorResult.text.includes('Recovered') && serverErrorCalls === 2, 'Server errors receive one retry');
+
+    const nonRetryableCases = [
+      { status: 401, message: 'API_KEY_INVALID', expected: 'INVALID_API_KEY' },
+      { status: 404, message: 'Model not found', expected: 'GEMINI_MODEL_UNAVAILABLE' },
+      { status: 400, message: 'Invalid request', expected: 'INVALID_GEMINI_REQUEST' },
+    ];
+    for (const testCase of nonRetryableCases) {
+      let calls = 0;
+      const provider = makeGeminiTestProvider(async () => {
+        calls++;
+        throw statusError(testCase.status, testCase.message);
+      });
+      let code = '';
+      let message = '';
+      try {
+        await provider.generateText('A non-retryable request.');
+      } catch (err: any) {
+        code = err.code;
+        message = err.message;
+      }
+      const messageIsSpecific =
+        testCase.expected === 'INVALID_API_KEY'
+          ? message.includes('API key')
+          : testCase.expected === 'GEMINI_MODEL_UNAVAILABLE'
+            ? message.includes('unavailable')
+            : message.includes('rejected the request');
+      assert(code === testCase.expected && calls === 1 && messageIsSpecific, `${testCase.expected} is clear and not retried`);
+    }
+  } finally {
+    Object.assign(runtimeConfig, originalGeminiConfig);
+  }
+
+  // 15. OPTIONAL LIVE GEMINI INTEGRATION
   // ─────────────────────────────────────────────────────────────
   console.log('\n--- Test 14: Live Gemini Integration Test ---');
   const liveGemini = new GeminiProvider();

@@ -34,45 +34,56 @@ async function handleResponse<T>(res: Response): Promise<T> {
   return json.data !== undefined ? json.data : json;
 }
 
-export async function checkBackendHealth(): Promise<HealthResponse> {
-  const res = await fetch(`${API_BASE}/api/health`);
+export async function checkBackendHealth(signal?: AbortSignal): Promise<HealthResponse> {
+  const res = await fetch(`${API_BASE}/api/health`, { signal });
   return handleResponse<HealthResponse>(res);
 }
 
-export async function extractFromUrlApi(url: string): Promise<StructuredContent> {
+export async function extractFromUrlApi(url: string, signal?: AbortSignal): Promise<StructuredContent> {
   const res = await fetch(`${API_BASE}/api/extract/url`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ url }),
+    signal,
   });
   return handleResponse<StructuredContent>(res);
 }
 
-export async function extractFromPdfApi(file: File): Promise<StructuredContent> {
+export async function extractFromPdfApi(file: File, signal?: AbortSignal): Promise<StructuredContent> {
   const formData = new FormData();
   formData.append('file', file);
 
   const res = await fetch(`${API_BASE}/api/extract/pdf`, {
     method: 'POST',
     body: formData,
+    signal,
   });
   return handleResponse<StructuredContent>(res);
 }
 
-export async function extractFromTextApi(text: string, title?: string): Promise<StructuredContent> {
+export async function extractFromTextApi(
+  text: string,
+  title?: string,
+  signal?: AbortSignal,
+): Promise<StructuredContent> {
   const res = await fetch(`${API_BASE}/api/extract/text`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ text, title }),
+    signal,
   });
   return handleResponse<StructuredContent>(res);
 }
 
-export async function generateLessonApi(content: StructuredContent): Promise<GeneratedLesson> {
+export async function generateLessonApi(
+  content: StructuredContent,
+  signal?: AbortSignal,
+): Promise<GeneratedLesson> {
   const res = await fetch(`${API_BASE}/api/lessons/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ content }),
+    signal,
   });
   return handleResponse<GeneratedLesson>(res);
 }
@@ -80,11 +91,13 @@ export async function generateLessonApi(content: StructuredContent): Promise<Gen
 export async function generateLessonAudioApi(
   lesson: GeneratedLesson,
   options?: { voice?: string; speed?: number },
+  signal?: AbortSignal,
 ): Promise<LessonAudioResult> {
   const res = await fetch(`${API_BASE}/api/tts/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ lesson, options }),
+    signal,
   });
   return handleResponse<LessonAudioResult>(res);
 }

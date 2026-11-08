@@ -3,13 +3,71 @@ import { LLMProvider, LLMGenerateOptions, LLMResponse } from './llm-provider.int
 import { config } from '../../../config.js';
 import { AppError } from '../../../middleware/error-handler.js';
 
+const MAX_TRANSIENT_RETRIES = 1;
+const RETRY_DELAY_MS = 1000;
+
+type GeminiFailureKind =
+  | 'authentication'
+  | 'unavailable-model'
+  | 'timeout'
+  | 'rate-limit'
+  | 'server'
+  | 'invalid-request'
+  | 'network'
+  | 'other';
+
+function classifyGeminiFailure(err: unknown): { kind: GeminiFailureKind; status?: number } {
+  const error = err as {
+    name?: string;
+    message?: string;
+    code?: string;
+    status?: number;
+    statusCode?: number;
+    cause?: { code?: string; message?: string };
+  };
+  const statusValue = Number(error?.status ?? error?.statusCode);
+  const status = Number.isFinite(statusValue) && statusValue > 0 ? statusValue : undefined;
+  const message = `${error?.message || ''} ${error?.cause?.message || ''}`.toLowerCase();
+  const code = `${error?.code || ''} ${error?.cause?.code || ''}`.toUpperCase();
+
+  if (
+    status === 401 ||
+    status === 403 ||
+    /api[_ ]key[_ ]invalid|invalid api key|api key not valid|unauthenticated/.test(message)
+  ) {
+    return { kind: 'authentication', status };
+  }
+  if (status === 404 || /model[^\n]*(not found|unavailable|does not exist)/.test(message)) {
+    return { kind: 'unavailable-model', status };
+  }
+  if (
+    status === 408 ||
+    error?.name === 'AbortError' ||
+    error?.name === 'TimeoutError' ||
+    code.includes('ETIMEDOUT') ||
+    code.includes('UND_ERR_CONNECT_TIMEOUT') ||
+    /timed? ?out|timeout|aborted/.test(message)
+  ) {
+    return { kind: 'timeout', status };
+  }
+  if (status === 429 || /resource_exhausted|rate.?limit|quota/.test(message)) {
+    return { kind: 'rate-limit', status };
+  }
+  if (status !== undefined && status >= 500) return { kind: 'server', status };
+  if (status === 400 || status === 422) return { kind: 'invalid-request', status };
+  if (/ECONNRESET|ECONNREFUSED|EAI_AGAIN|ENOTFOUND/.test(code) || /fetch failed/.test(message)) {
+    return { kind: 'network', status };
+  }
+  return { kind: 'other', status };
+}
+
 export class GeminiProvider implements LLMProvider {
   public readonly name = 'gemini';
   public readonly modelName: string;
   private client: GoogleGenAI | null = null;
 
   constructor(modelName?: string) {
-    this.modelName = modelName || config.geminiModel || 'gemini-2.5-flash';
+    this.modelName = modelName || config.geminiModel || 'gemini-3.8-flash';
     if (config.geminiApiKey && config.geminiApiKey.trim()) {
       this.client = new GoogleGenAI({ apiKey: config.geminiApiKey.trim() });
     }
@@ -65,20 +123,19 @@ export class GeminiProvider implements LLMProvider {
 
   public async generateText(prompt: string, options?: LLMGenerateOptions): Promise<LLMResponse> {
     const ai = this.ensureConfigured();
-    const maxRetries = config.maxRetries;
     const timeoutMs = options?.timeoutMs || config.requestTimeoutMs;
+    let lastError: unknown;
 
-    let lastError: any;
-
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    for (let attempt = 0; attempt <= MAX_TRANSIENT_RETRIES; attempt++) {
       try {
-        const timeoutPromise = new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new AppError(`Gemini request timed out after ${timeoutMs / 1000}s`, 504, 'AI_TIMEOUT')), timeoutMs),
-        );
-
         const genConfig: any = {
           temperature: options?.temperature ?? 0.2,
           maxOutputTokens: options?.maxOutputTokens,
+          httpOptions: {
+            timeout: timeoutMs,
+            // Keep retries in this provider so the total retry count is explicit and bounded.
+            retryOptions: { attempts: 1 },
+          },
         };
 
         if (options?.systemInstruction) {
@@ -95,7 +152,7 @@ export class GeminiProvider implements LLMProvider {
           config: genConfig,
         });
 
-        const response: any = await Promise.race([callPromise, timeoutPromise]);
+        const response: any = await callPromise;
         const text = response?.text || response?.candidates?.[0]?.content?.parts?.[0]?.text || '';
 
         if (!text || !text.trim()) {
@@ -111,28 +168,52 @@ export class GeminiProvider implements LLMProvider {
           : undefined;
 
         return { text, usage };
-      } catch (err: any) {
+      } catch (err: unknown) {
         lastError = err;
-        const errMsg = err?.message || '';
+        const failure = classifyGeminiFailure(err);
+        const retryable = ['timeout', 'rate-limit', 'server', 'network'].includes(failure.kind);
 
-        // Check for rate limit or quota exceeded
-        const isRateLimit = errMsg.includes('429') || errMsg.includes('RESOURCE_EXHAUSTED') || errMsg.includes('quota');
-        const isTransient = isRateLimit || errMsg.includes('503') || errMsg.includes('ECONNRESET');
-
-        if (isTransient && attempt < maxRetries) {
-          const backoffMs = (attempt + 1) * 2000;
-          console.warn(`[GeminiProvider] Transient error (attempt ${attempt + 1}/${maxRetries}), retrying in ${backoffMs}ms:`, errMsg);
-          await new Promise((resolve) => setTimeout(resolve, backoffMs));
+        if (retryable && attempt < MAX_TRANSIENT_RETRIES) {
+          console.warn(`[GeminiProvider] Transient ${failure.kind} error; retrying once.`);
+          await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
           continue;
         }
 
-        if (err instanceof AppError) throw err;
-
-        if (errMsg.includes('API_KEY_INVALID') || errMsg.includes('invalid api key')) {
-          throw new AppError('The configured GEMINI_API_KEY is invalid.', 401, 'INVALID_API_KEY');
+        if (failure.kind === 'authentication') {
+          throw new AppError(
+            'Gemini rejected the API key or its permissions. Verify GEMINI_API_KEY in server/.env.',
+            failure.status || 401,
+            'INVALID_API_KEY',
+          );
         }
-
-        throw new AppError(`Gemini AI generation failed: ${errMsg}`, 502, 'AI_PROVIDER_ERROR');
+        if (failure.kind === 'unavailable-model') {
+          throw new AppError(
+            `Gemini model "${this.modelName}" is unavailable to this API key. Check GEMINI_MODEL and model access.`,
+            404,
+            'GEMINI_MODEL_UNAVAILABLE',
+          );
+        }
+        if (failure.kind === 'timeout') {
+          throw new AppError(
+            `Gemini request timed out after ${Math.ceil(timeoutMs / 1000)}s. Try again or reduce the source length.`,
+            504,
+            'AI_TIMEOUT',
+          );
+        }
+        if (failure.kind === 'rate-limit') {
+          throw new AppError('Gemini rate limits were reached. Wait briefly, then try again.', 429, 'GEMINI_RATE_LIMITED');
+        }
+        if (failure.kind === 'server') {
+          throw new AppError('Gemini is temporarily unavailable. Try generating the lesson again.', 503, 'GEMINI_SERVICE_UNAVAILABLE');
+        }
+        if (failure.kind === 'invalid-request') {
+          throw new AppError('Gemini rejected the request. Check the source content and generation settings.', failure.status || 400, 'INVALID_GEMINI_REQUEST');
+        }
+        if (failure.kind === 'network') {
+          throw new AppError('Could not connect to Gemini after one retry. Check the server network and try again.', 502, 'GEMINI_NETWORK_ERROR');
+        }
+        if (err instanceof AppError) throw err;
+        throw new AppError('Gemini generation failed unexpectedly. Try again later.', 502, 'AI_PROVIDER_ERROR');
       }
     }
 
