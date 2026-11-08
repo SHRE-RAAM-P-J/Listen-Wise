@@ -1,7 +1,7 @@
 import { AlertCircle, Check, Loader2 } from 'lucide-react';
 import { GeneratedLesson } from '../types/lesson';
 import { StructuredContent } from '../types/structured-content';
-import { FailurePoint, StageView } from '../types/pipeline';
+import { FailurePoint, InputMode, StageView } from '../types/pipeline';
 
 interface ProcessingPageProps {
   stages: StageView[];
@@ -12,6 +12,7 @@ interface ProcessingPageProps {
   busy: boolean;
   onRetry: () => void;
   onOpenLesson: () => void;
+  onChooseSource: (mode: InputMode) => void;
   onStartOver: () => void;
 }
 
@@ -37,6 +38,7 @@ export function ProcessingPage({
   busy,
   onRetry,
   onOpenLesson,
+  onChooseSource,
   onStartOver,
 }: ProcessingPageProps) {
   const active = stages.filter((stage) => stage.state === 'active');
@@ -98,7 +100,9 @@ export function ProcessingPage({
 
       {content && (
         <section className="mt-10 border-t border-stone-200 pt-8" aria-labelledby="extracted-document-title">
-          <p className="text-xs font-medium uppercase tracking-wide text-stone-500">Extraction complete</p>
+          <p className="text-xs font-medium uppercase tracking-wide text-stone-500">
+            {error && failurePoint === 'source' ? 'Source details' : 'Extraction complete'}
+          </p>
           <h2 id="extracted-document-title" className="mt-2 font-serif text-2xl text-stone-900">
             {content.title || 'Untitled document'}
           </h2>
@@ -163,6 +167,24 @@ export function ProcessingPage({
               >
                 Open lesson
               </button>
+            )}
+            {failurePoint === 'source' && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => onChooseSource('text')}
+                  className="inline-flex min-h-11 items-center justify-center rounded-lg border border-stone-300 bg-white px-4 text-sm font-medium text-stone-900 hover:bg-stone-50"
+                >
+                  Paste text instead
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onChooseSource('pdf')}
+                  className="inline-flex min-h-11 items-center justify-center rounded-lg border border-stone-300 bg-white px-4 text-sm font-medium text-stone-900 hover:bg-stone-50"
+                >
+                  Upload a PDF instead
+                </button>
+              </>
             )}
             <button
               type="button"

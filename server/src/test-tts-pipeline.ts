@@ -133,6 +133,26 @@ async function runPhase3Tests() {
     createdAt: new Date().toISOString(),
   };
 
+  const rejectedLesson: Lesson = {
+    ...multiChapterLesson,
+    id: `rejected-lesson-${Date.now()}`,
+    validation: {
+      sourceCoverage: 'failed',
+      coverageScore: 0,
+      unsupportedClaims: [],
+      warnings: ['No generated content matched the source.'],
+      coveredSectionTitles: [],
+      missingSectionTitles: ['Source section'],
+    },
+  };
+  let invalidLessonAudioBlocked = false;
+  try {
+    await GnaniTtsService.generateLessonAudio(rejectedLesson, { mockMode: true });
+  } catch (err: any) {
+    invalidLessonAudioBlocked = err.code === 'SOURCE_VALIDATION_FAILED';
+  }
+  assert(invalidLessonAudioBlocked, 'Does not start TTS for a lesson with failed source validation');
+
   const audioResult = await GnaniTtsService.generateLessonAudio(multiChapterLesson, { mockMode: true });
 
   assert(audioResult.audioSegments.length === 3, 'Generates audio segments for all 3 chapters');

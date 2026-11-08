@@ -1,5 +1,6 @@
 import { config } from '../../config.js';
 import { AppError } from '../../middleware/error-handler.js';
+import { LessonValidatorService } from '../ai/lesson-validator.service.js';
 import { WavUtils } from './wav-utils.js';
 import { TempStorageService } from '../storage/temp-storage.service.js';
 import { Lesson, LessonChapter, AudioSegment, LessonAudioResult } from '../../models/lesson.js';
@@ -223,6 +224,8 @@ export class GnaniTtsService {
     lesson: Lesson,
     options?: GnaniTtsOptions,
   ): Promise<LessonAudioResult> {
+    LessonValidatorService.assertPassed(lesson.validation, lesson.documentTitle);
+
     if (!lesson.chapters || lesson.chapters.length === 0) {
       throw new AppError('The lesson contains no chapters for audio generation.', 400, 'NO_CHAPTERS_TO_SYNTHESIZE');
     }

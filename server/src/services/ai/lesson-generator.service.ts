@@ -12,6 +12,7 @@ import { LLMFactory } from './llm.factory.js';
 import { ChunkingService } from './chunking.service.js';
 import { PromptBuilderService } from './prompt-builder.service.js';
 import { LessonValidatorService } from './lesson-validator.service.js';
+import { SourceQualityService } from '../extraction/source-quality.service.js';
 import { AppError } from '../../middleware/error-handler.js';
 
 export interface GenerateLessonOptions {
@@ -28,6 +29,7 @@ export class LessonGeneratorService {
   ): Promise<GeneratedLesson> {
     // 1. Assign deterministic IDs to blocks & sections if not already present
     const document = ensureContentIdentifiers(rawDocument);
+    SourceQualityService.assertUsable(document);
 
     // 2. Select LLM Provider
     const provider = options?.provider || LLMFactory.getProvider();
@@ -162,6 +164,11 @@ export class LessonGeneratorService {
     // 7. Stage 5: Rigorous Source Coverage and Unsupported-Claim Validation
     console.log('[LessonGenerator] Running source coverage and claim validation...');
     const validation = LessonValidatorService.validateLesson(document, understanding, chapters);
+    LessonValidatorService.assertPassed(
+      validation,
+      document.title,
+      document.source.type === 'url' ? document.source.url : undefined,
+    );
 
     // 8. Construct & Validate Final Generated Lesson
     const lessonOverview = `A ${chapters.length}-chapter audio lesson covering ${understanding.mainTopics.slice(0, 3).join(', ')}. Objective: ${understanding.learningObjective}`;

@@ -25,6 +25,8 @@ export const config = {
   // Document Chunking & AI Processing Limits
   maxDocumentWords: parseInt(process.env.MAX_DOCUMENT_WORDS || '40000', 10),
   targetChunkWords: parseInt(process.env.TARGET_CHUNK_WORDS || '1800', 10),
+  minUrlContentWords: parseInt(process.env.MIN_URL_CONTENT_WORDS || '40', 10),
+  minUrlContentChars: parseInt(process.env.MIN_URL_CONTENT_CHARS || '200', 10),
   // Gemini retries are bounded in its provider; this shared setting remains for TTS.
   maxRetries: parseInt(process.env.AI_MAX_RETRIES || '2', 10),
   requestTimeoutMs: parseInt(process.env.AI_TIMEOUT_MS || '90000', 10),

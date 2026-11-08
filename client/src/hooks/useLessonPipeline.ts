@@ -21,6 +21,7 @@ import {
 import { isAbortError, toUserMessage } from '../lib/errors';
 import { applyAudioResult } from '../lib/lesson-audio';
 import { validatePdfFile, validateSource } from '../lib/source';
+import { ApiRequestError } from '../services/api';
 
 type StartAt = 'extract' | 'lesson' | 'audio';
 
@@ -154,8 +155,16 @@ export function useLessonPipeline() {
       if (isAbortError(err) || !isCurrent(id)) return;
       const message = toUserMessage(err, 'The lesson could not be created.');
       setError(message);
+      const errorCode = err instanceof ApiRequestError ? err.code : undefined;
       if (startAt === 'extract' && !contentRef.current) {
         setStages(stagesFor([], [], ['reading', 'extracting']));
+        setFailurePoint('source');
+      } else if (errorCode === 'SOURCE_CONTENT_UNAVAILABLE' || errorCode === 'SOURCE_VALIDATION_FAILED') {
+        setStages(
+          errorCode === 'SOURCE_CONTENT_UNAVAILABLE'
+            ? stagesFor([], [], ['reading', 'extracting'])
+            : stagesFor([], ['reading', 'extracting'], ['understanding', 'chapters']),
+        );
         setFailurePoint('source');
       } else {
         setStages(stagesFor([], ['reading', 'extracting'], ['understanding', 'chapters']));
@@ -265,6 +274,22 @@ export function useLessonPipeline() {
     setValidationMessage(null);
   };
 
+  const chooseSource = (nextMode: InputMode) => {
+    runId.current += 1;
+    abortRef.current?.abort();
+    setBusy(false);
+    setScreen('home');
+    setStages(idleStages());
+    rememberContent(null);
+    rememberLesson(null);
+    setError(null);
+    setFailurePoint(null);
+    setAudioStatus('missing');
+    setAudioError(null);
+    setValidationMessage(null);
+    setMode(nextMode);
+  };
+
   return {
     screen,
     mode,
@@ -294,6 +319,7 @@ export function useLessonPipeline() {
     retry,
     regenerateAudio,
     openLesson,
+    chooseSource,
     reset,
   };
 }

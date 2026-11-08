@@ -17,18 +17,27 @@ export interface ApiErrorResponse {
   };
 }
 
+export class ApiRequestError extends Error {
+  constructor(message: string, public readonly code?: string, public readonly status?: number) {
+    super(message);
+    this.name = 'ApiRequestError';
+  }
+}
+
 async function handleResponse<T>(res: Response): Promise<T> {
   if (!res.ok) {
     let errorMessage = `Request failed with HTTP ${res.status}`;
+    let errorCode: string | undefined;
     try {
       const errJson = (await res.json()) as ApiErrorResponse;
       if (errJson?.error?.message) {
         errorMessage = errJson.error.message;
       }
+      errorCode = errJson?.error?.code;
     } catch {
       // ignore JSON parse error
     }
-    throw new Error(errorMessage);
+    throw new ApiRequestError(errorMessage, errorCode, res.status);
   }
   const json = await res.json();
   return json.data !== undefined ? json.data : json;

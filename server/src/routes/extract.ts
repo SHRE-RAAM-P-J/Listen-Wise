@@ -5,6 +5,7 @@ import { extractFromPdfBuffer } from '../services/extraction/pdf-extractor.js';
 import { extractFromPastedText } from '../services/extraction/text-extractor.js';
 import { config } from '../config.js';
 import { AppError } from '../middleware/error-handler.js';
+import { SourceQualityService } from '../services/extraction/source-quality.service.js';
 
 const router: Router = Router();
 
@@ -36,6 +37,7 @@ router.post('/url', async (req: Request, res: Response, next: NextFunction) => {
     }
 
     const structuredContent = await extractFromUrl(url.trim());
+    SourceQualityService.assertUsable(structuredContent);
     res.json({
       success: true,
       data: structuredContent,
@@ -60,6 +62,7 @@ router.post(
 
       const originalName = req.file.originalname || 'document.pdf';
       const structuredContent = await extractFromPdfBuffer(req.file.buffer, originalName);
+      SourceQualityService.assertUsable(structuredContent);
 
       res.json({
         success: true,
@@ -83,6 +86,7 @@ router.post('/text', async (req: Request, res: Response, next: NextFunction) => 
     }
 
     const structuredContent = extractFromPastedText(text, { customTitle: title });
+    SourceQualityService.assertUsable(structuredContent);
     res.json({
       success: true,
       data: structuredContent,

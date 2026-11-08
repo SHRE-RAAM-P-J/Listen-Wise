@@ -99,6 +99,8 @@ GNANI_API_KEY=your_actual_gnani_api_key_here
 # File storage & limits
 TEMP_DIR=./tmp
 MAX_UPLOAD_SIZE_MB=20
+MIN_URL_CONTENT_WORDS=40
+MIN_URL_CONTENT_CHARS=200
 ```
 
 > [!TIP]

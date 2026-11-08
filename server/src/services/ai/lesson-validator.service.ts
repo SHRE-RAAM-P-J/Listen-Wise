@@ -1,12 +1,64 @@
-import { StructuredContent } from '../../models/structured-content.js';
+import { StructuredContent, ensureContentIdentifiers } from '../../models/structured-content.js';
 import {
   LessonChapter,
   LessonValidation,
   DocumentUnderstanding,
   UnsupportedClaimItem,
 } from '../../models/lesson.js';
+import { AppError } from '../../middleware/error-handler.js';
+
+const STOP_WORDS = new Set(
+  'about after again against all also among an and any are around as at be because been before being between both but by can could did do does doing down during each few for from further had has have having he her here hers herself him himself his how i if in into is it its itself just more most my myself no nor not of off on once only or other our ours ourselves out over own same she should so some such than that the their theirs them themselves then there these they this those through to too under until up very was we were what when where which while who why with would you your yours yourself yourselves a it the'.split(' '),
+);
+
+function meaningfulTokens(value: string): Set<string> {
+  return new Set(
+    (value.toLowerCase().match(/[\p{L}\p{N}]{2,}/gu) || []).filter(
+      (token) => !STOP_WORDS.has(token),
+    ),
+  );
+}
+
+function sectionBody(section: StructuredContent['sections'][number]): string {
+  return section.blocks
+    .map((block) => {
+      if ((block.type === 'ordered-list' || block.type === 'unordered-list') && block.items?.length) {
+        return block.items.join(' ');
+      }
+      if (block.type === 'table' && block.tableData?.length) {
+        return block.tableData.flatMap((row) => row).join(' ');
+      }
+      return block.content || '';
+    })
+    .join(' ')
+    .trim();
+}
 
 export class LessonValidatorService {
+  public static assertPassed(
+    validation: LessonValidation | undefined,
+    documentTitle = 'this source',
+    sourceUrl?: string,
+  ): void {
+    const valid =
+      validation?.sourceCoverage === 'passed' &&
+      Number.isFinite(validation.coverageScore) &&
+      validation.coverageScore >= 0.7 &&
+      Array.isArray(validation.unsupportedClaims) &&
+      validation.unsupportedClaims.length === 0;
+    if (valid) return;
+
+    const percent = Number.isFinite(validation?.coverageScore)
+      ? Math.round((validation?.coverageScore || 0) * 100)
+      : 0;
+    const sourceContext = sourceUrl ? ` (${sourceUrl})` : '';
+    throw new AppError(
+      `We couldn't verify that the lesson is grounded in "${documentTitle}"${sourceContext} (${percent}% source coverage). No audio was generated. Try a more complete source or paste the relevant text.`,
+      422,
+      'SOURCE_VALIDATION_FAILED',
+    );
+  }
+
   /**
    * Performs rigorous source coverage and factual alignment validation.
    */
@@ -18,22 +70,32 @@ export class LessonValidatorService {
     const warnings: string[] = [];
     const unsupportedClaims: UnsupportedClaimItem[] = [];
 
-    // 1. Gather all valid block IDs and source text
+    // 1. Normalize IDs and gather source text by section.
+    const identifiedDocument = ensureContentIdentifiers(document);
     const validBlockIds = new Set<string>();
     const allSourceTextParts: string[] = [];
     const sourceNumbers = new Set<string>();
-    const sourceSectionTitles = new Set<string>();
 
-    for (const sec of document.sections) {
-      if (sec.heading && sec.heading.trim()) {
-        sourceSectionTitles.add(sec.heading.trim());
-      }
+    const sourceSections = identifiedDocument.sections
+      .map((sec, index) => {
+        const body = sectionBody(sec);
+        const blockIds = new Set(sec.blocks.map((block) => block.id).filter((id): id is string => Boolean(id)));
+        return {
+          title: sec.heading?.trim() || `Section ${index + 1}`,
+          body,
+          blockIds,
+          tokens: meaningfulTokens(body),
+        };
+      })
+      .filter((section) => section.body.length > 0);
+
+    for (const sec of identifiedDocument.sections) {
       for (const blk of sec.blocks) {
         if (blk.id) validBlockIds.add(blk.id);
         if (blk.content) {
           allSourceTextParts.push(blk.content);
           // Find numbers (integers, decimals, percentages)
-          const matches = blk.content.match(/\b\d+(?:\.\d+)?%?\b/g);
+          const matches = blk.content.match(/\b\d[\d,]*(?:\.\d+)?%?/g);
           if (matches) {
             for (const m of matches) sourceNumbers.add(m);
           }
@@ -52,33 +114,32 @@ export class LessonValidatorService {
     const fullSourceText = allSourceTextParts.join(' ').toLowerCase();
     const fullLessonScript = chapters.map((c) => c.teachingScript).join(' ');
 
-    // 2. Validate Source Coverage of Sections
+    // 2. Validate source coverage using real block IDs and lexical evidence from each section.
     const coveredSectionTitles: string[] = [];
     const missingSectionTitles: string[] = [];
 
-    for (const secTitle of sourceSectionTitles) {
-      const lowerTitle = secTitle.toLowerCase();
-      // Check if title or key tokens appear in chapter titles or concepts or script
-      const titleTokens = lowerTitle.split(/\s+/).filter((t) => t.length > 3);
-      const isReferencedInChapters = chapters.some((ch) => {
-        if (ch.title.toLowerCase().includes(lowerTitle)) return true;
-        if (ch.overview.toLowerCase().includes(lowerTitle)) return true;
-        if (ch.conceptsCovered.some((c) => c.toLowerCase().includes(lowerTitle))) return true;
-        if (ch.sourceReferences.some((r) => r.sectionTitle?.toLowerCase() === lowerTitle)) return true;
-        // Token match
-        if (titleTokens.length > 0 && titleTokens.every((tok) => ch.teachingScript.toLowerCase().includes(tok))) return true;
-        return false;
+    for (const section of sourceSections) {
+      const minimumEvidenceTerms = Math.min(2, section.tokens.size);
+      const groundedInChapter = minimumEvidenceTerms > 0 && chapters.some((chapter) => {
+        const hasValidBlockReference = (chapter.sourceReferences || []).some(
+          (reference) => reference.blockId && section.blockIds.has(reference.blockId),
+        );
+        if (!hasValidBlockReference) return false;
+        const chapterText = [chapter.title, chapter.overview, ...chapter.conceptsCovered, chapter.teachingScript].join(' ');
+        const chapterTokens = meaningfulTokens(chapterText);
+        const overlapCount = [...section.tokens].filter((token) => chapterTokens.has(token)).length;
+        return overlapCount >= minimumEvidenceTerms;
       });
 
-      if (isReferencedInChapters) {
-        coveredSectionTitles.push(secTitle);
+      if (groundedInChapter) {
+        coveredSectionTitles.push(section.title);
       } else {
-        missingSectionTitles.push(secTitle);
+        missingSectionTitles.push(section.title);
       }
     }
 
-    const totalSectionsCount = sourceSectionTitles.size > 0 ? sourceSectionTitles.size : 1;
-    const coverageScore = coveredSectionTitles.length / totalSectionsCount;
+    const totalSectionsCount = sourceSections.length;
+    const coverageScore = totalSectionsCount > 0 ? coveredSectionTitles.length / totalSectionsCount : 0;
 
     if (coverageScore < 0.6 && missingSectionTitles.length > 0) {
       warnings.push(
@@ -101,7 +162,7 @@ export class LessonValidatorService {
       }
     }
 
-    // 4. Verify Chapter Source References point to actual blocks
+    // 4. Verify chapter source references point to actual source blocks.
     for (const chapter of chapters) {
       if (!chapter.sourceReferences || chapter.sourceReferences.length === 0) {
         warnings.push(`Chapter "${chapter.title}" has no explicit source block references.`);
@@ -110,25 +171,33 @@ export class LessonValidatorService {
 
       for (const ref of chapter.sourceReferences) {
         if (ref.blockId && !validBlockIds.has(ref.blockId)) {
-          warnings.push(
-            `Chapter "${chapter.title}" references source block ID "${ref.blockId}" which does not exist in the source document.`,
-          );
+          const message = `Chapter "${chapter.title}" references source block ID "${ref.blockId}" which does not exist in the source document.`;
+          warnings.push(message);
+          unsupportedClaims.push({
+            claim: `Invalid source reference "${ref.blockId}" in chapter "${chapter.title}"`,
+            chapterId: chapter.id,
+            reason: message,
+            severity: 'discrepancy',
+          });
         }
       }
     }
 
-    // 5. Unsupported-Claim / Metric Verification
-    // Check for specific numbers/percentages introduced in the script that were never in the source
+    // 5. Unsupported numeric claims are not grounded just because the section title matched.
     for (const chapter of chapters) {
-      const scriptNumbers = chapter.teachingScript.match(/\b\d+(?:\.\d+)?%/g); // Check percentages without trailing \b since % is non-word
+      const scriptNumbers = chapter.teachingScript.match(/\b\d[\d,]*(?:\.\d+)?%?/g);
       if (scriptNumbers) {
         for (const num of scriptNumbers) {
-          if (!sourceNumbers.has(num) && !fullSourceText.includes(num.toLowerCase())) {
+          const normalized = num.replace(/[,%]/g, '');
+          const numberIsGrounded = num.endsWith('%')
+            ? fullSourceText.includes(num.toLowerCase())
+            : sourceNumbers.has(num) || sourceNumbers.has(normalized) || fullSourceText.includes(num.toLowerCase());
+          if (!numberIsGrounded) {
             unsupportedClaims.push({
-              claim: `Percentage metric "${num}" used in chapter "${chapter.title}"`,
+              claim: `Numeric claim "${num}" used in chapter "${chapter.title}"`,
               chapterId: chapter.id,
-              reason: `The percentage "${num}" was not found in the extracted source material.`,
-              severity: 'warning',
+              reason: `The number "${num}" was not found in the extracted source material.`,
+              severity: 'discrepancy',
             });
           }
         }

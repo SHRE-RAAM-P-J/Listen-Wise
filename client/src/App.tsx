@@ -46,6 +46,7 @@ export default function App() {
           busy={pipeline.busy}
           onRetry={pipeline.retry}
           onOpenLesson={pipeline.openLesson}
+          onChooseSource={pipeline.chooseSource}
           onStartOver={pipeline.reset}
         />
       )}

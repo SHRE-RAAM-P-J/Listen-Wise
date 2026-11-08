@@ -3,6 +3,8 @@ import { extractFromPdfBuffer } from './services/extraction/pdf-extractor.js';
 import { parseHtmlToStructuredContent, extractFromUrl } from './services/extraction/html-extractor.js';
 import { validateUrlSafety } from './utils/url-security.js';
 import { generateTestPdfBuffer } from './test-pdf-generator.js';
+import { SourceQualityService } from './services/extraction/source-quality.service.js';
+import { StructuredContent } from './models/structured-content.js';
 
 let passed = 0;
 let failed = 0;
@@ -77,6 +79,8 @@ For more details, see https://deeplearningbook.org
     assert(hasTable, 'Extracts table preserving row/column matrix');
     assert(textCCR.wordCount > 50, `Calculates accurate word count (${textCCR.wordCount} words)`);
     assert(textCCR.sourceReferences?.[0] === 'https://deeplearningbook.org', 'Extracts reference URLs');
+    SourceQualityService.assertUsable(extractFromPastedText('Gravity pulls objects toward Earth.'));
+    assert(true, 'Accepts legitimate short pasted text without URL length thresholds');
   } catch (err: any) {
     console.error('Error in text extraction test:', err);
     failed++;
@@ -97,6 +101,8 @@ For more details, see https://deeplearningbook.org
     const pdfText = pdfCCR.sections.flatMap((s) => s.blocks).map((b) => b.content).join(' ');
     assert(pdfText.includes('Qubits') || pdfText.includes('superposition'), 'Extracts text in reading order');
     assert(pdfCCR.wordCount > 10, `Calculates PDF word count (${pdfCCR.wordCount} words)`);
+    SourceQualityService.assertUsable(pdfCCR);
+    assert(true, 'Accepts normal PDF extraction without URL-specific thresholds');
 
     // Test rejection of non-PDF buffer
     let nonPdfRejected = false;
@@ -201,6 +207,8 @@ For more details, see https://deeplearningbook.org
     const fullText = allBlocks.map((b) => b.content).join(' ');
     assert(!fullText.includes('Buy headphones now'), 'Strips irrelevant advertisements');
     assert(!fullText.includes('Login'), 'Strips navigation links');
+    SourceQualityService.assertUsable(htmlCCR);
+    assert(true, 'Accepts a valid webpage article with meaningful body text and source URL');
   } catch (err: any) {
     console.error('Error in HTML extraction test:', err);
     failed++;
@@ -209,6 +217,55 @@ For more details, see https://deeplearningbook.org
   // ─────────────────────────────────────────────────────────────
   // 5. LIVE WEBPAGE FETCH TEST
   // ─────────────────────────────────────────────────────────────
+  console.log('\n--- 4a. Testing URL Extraction Quality Gate ---');
+  const urlContent = (body: string): StructuredContent => ({
+    title: 'The Investment Guide',
+    source: {
+      type: 'url',
+      url: 'https://unstop.com/resources/the-investment-guide',
+      extractedAt: new Date().toISOString(),
+    },
+    sections: [{ heading: 'The Investment Guide', blocks: [{ type: 'paragraph', content: body }] }],
+    wordCount: body.trim().split(/\s+/).length,
+    language: 'en',
+  });
+  const rejectedUrlFixtures = [
+    {
+      name: '13-word loading placeholder',
+      body: 'The investment guide is loading. Please wait while the page prepares its full content for you.',
+    },
+    {
+      name: 'browser compatibility placeholder',
+      body: 'Your browser is not supported. Please update your browser to read this investment guide.',
+    },
+    {
+      name: 'anti-bot blocked page',
+      body: 'Access denied. Unusual traffic was detected. Verify that you are human before continuing.',
+    },
+    {
+      name: 'cookie consent page',
+      body: 'We use cookies to improve this site. Accept all cookies or update cookie preferences to continue.',
+    },
+  ];
+  for (const fixture of rejectedUrlFixtures) {
+    let rejection: unknown;
+    try {
+      SourceQualityService.assertUsable(urlContent(fixture.body));
+    } catch (err) {
+      rejection = err;
+    }
+    const error = rejection as { code?: string; message?: string } | undefined;
+    assert(
+      Boolean(
+        error?.code === 'SOURCE_CONTENT_UNAVAILABLE' &&
+          error.message?.includes('The Investment Guide') &&
+          error.message?.includes('https://unstop.com/resources/the-investment-guide') &&
+          error.message?.includes('pasting the article text or uploading a PDF'),
+      ),
+      `Rejects ${fixture.name} and preserves title, URL, and recovery guidance`,
+    );
+  }
+
   console.log('\n--- 5. Testing Live Webpage Extraction ---');
   try {
     const liveUrl = 'https://en.wikipedia.org/wiki/Podcast';

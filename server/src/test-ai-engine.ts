@@ -7,6 +7,7 @@ import { PromptBuilderService } from './services/ai/prompt-builder.service.js';
 import { GeminiProvider } from './services/ai/providers/gemini.provider.js';
 import { parseHtmlToStructuredContent } from './services/extraction/html-extractor.js';
 import { extractFromPdfBuffer } from './services/extraction/pdf-extractor.js';
+import { extractFromPastedText } from './services/extraction/text-extractor.js';
 import { generateTestPdfBuffer } from './test-pdf-generator.js';
 import { AppError } from './middleware/error-handler.js';
 import { config } from './config.js';
@@ -427,7 +428,117 @@ def scaled_dot_product(q, k, v, d_k):
   assert(foundBadRefWarning, 'Detects references to non-existent source block IDs and logs warnings');
 
   // ─────────────────────────────────────────────────────────────
-  // 14. GEMINI TIMEOUT, RETRY & ERROR HANDLING
+  // 14. Source grounding and output gates
+  console.log('\n--- Source Grounding Generation Gates ---');
+  const shortUrlSource: StructuredContent = {
+    title: 'The Investment Guide',
+    source: { type: 'url', url: 'https://unstop.com/resources/the-investment-guide', extractedAt: new Date().toISOString() },
+    sections: [{ heading: 'The Investment Guide', blocks: [{ type: 'paragraph', content: 'Guide is loading. Please wait while we prepare the full article for you.' }] }],
+    wordCount: 13,
+    language: 'en',
+  };
+  let shortUrlProviderCalls = 0;
+  const unusedProvider = new MockLLMProvider(async () => {
+    shortUrlProviderCalls++;
+    return {};
+  });
+  let shortUrlError: any;
+  try {
+    await LessonGeneratorService.generateLesson(shortUrlSource, { provider: unusedProvider });
+  } catch (err: any) {
+    shortUrlError = err;
+  }
+  assert(
+    shortUrlError?.code === 'SOURCE_CONTENT_UNAVAILABLE' &&
+      shortUrlError.message.includes('The Investment Guide') &&
+      shortUrlError.message.includes('https://unstop.com/resources/the-investment-guide') &&
+      shortUrlProviderCalls === 0,
+    'Rejects the 13-word URL extraction before any Gemini/provider request and preserves source context',
+  );
+
+  const zeroCoverageSource = extractFromPastedText(
+    'Mangrove roots stabilize coastal soil and shelter juvenile fish along tropical shorelines.',
+    { customTitle: 'Mangrove Ecosystems' },
+  );
+  const unrelatedChapter = {
+    id: 'chapter-1',
+    title: 'Unrelated Loading States',
+    overview: 'A chapter unrelated to the submitted source.',
+    conceptsCovered: ['Loading states'],
+    teachingScript: 'This unrelated lesson explains browser loading indicators and compatibility behavior.',
+    transitionToNext: '',
+    sourceReferences: [],
+  };
+  const zeroCoverageValidation = LessonValidatorService.validateLesson(
+    zeroCoverageSource,
+    understandingForTest,
+    [unrelatedChapter],
+  );
+  assert(
+    zeroCoverageValidation.coverageScore === 0 && zeroCoverageValidation.sourceCoverage === 'failed',
+    'Zero source coverage is recorded as failed rather than accepted',
+  );
+  let zeroCoverageBlocked = false;
+  try {
+    LessonValidatorService.assertPassed(zeroCoverageValidation, zeroCoverageSource.title);
+  } catch (err: any) {
+    zeroCoverageBlocked = err.code === 'SOURCE_VALIDATION_FAILED' && err.message.includes('0% source coverage');
+  }
+  assert(zeroCoverageBlocked, 'Zero-coverage lesson is blocked with an actionable source error');
+  let zeroCoverageGenerationBlocked = false;
+  try {
+    const zeroCoverageProvider = new MockLLMProvider(async (prompt: string) =>
+      prompt.includes('TASK:') ? understandingForTest : unrelatedChapter,
+    );
+    await LessonGeneratorService.generateLesson(zeroCoverageSource, { provider: zeroCoverageProvider });
+  } catch (err: any) {
+    zeroCoverageGenerationBlocked = err.code === 'SOURCE_VALIDATION_FAILED';
+  }
+  assert(zeroCoverageGenerationBlocked, 'Lesson generation itself stops after a zero-coverage model response');
+
+  const groundedSource = extractFromPastedText(
+    'Coral reefs are built by colonies of coral polyps that secrete calcium carbonate skeletons.',
+    { customTitle: 'Coral Reef Formation' },
+  );
+  const unsupportedClaimChapter = {
+    id: 'chapter-1',
+    title: 'Coral Reef Formation',
+    overview: 'How coral polyps build reefs.',
+    conceptsCovered: ['Coral reefs', 'polyps'],
+    teachingScript: 'Coral reefs are built by colonies of coral polyps that secrete calcium carbonate skeletons. This process reaches 99.7% growth.',
+    transitionToNext: '',
+    sourceReferences: [{ blockId: 'sec-1-b1', sectionTitle: 'Coral Reef Formation' }],
+  };
+  const unsupportedValidation = LessonValidatorService.validateLesson(
+    groundedSource,
+    understandingForTest,
+    [unsupportedClaimChapter],
+  );
+  assert(
+    unsupportedValidation.coverageScore === 1 &&
+      unsupportedValidation.unsupportedClaims.some((claim) => claim.claim.includes('99.7%')) &&
+      unsupportedValidation.sourceCoverage !== 'passed',
+    'A numerically unsupported Gemini claim prevents a passing coverage result even when section overlap is high',
+  );
+  let unsupportedClaimBlocked = false;
+  try {
+    LessonValidatorService.assertPassed(unsupportedValidation, groundedSource.title);
+  } catch (err: any) {
+    unsupportedClaimBlocked = err.code === 'SOURCE_VALIDATION_FAILED';
+  }
+  assert(unsupportedClaimBlocked, 'Lesson validation rejects unsupported claims before lesson/audio completion');
+  let unsupportedGenerationBlocked = false;
+  try {
+    const unsupportedProvider = new MockLLMProvider(async (prompt: string) =>
+      prompt.includes('TASK:') ? understandingForTest : unsupportedClaimChapter,
+    );
+    await LessonGeneratorService.generateLesson(groundedSource, { provider: unsupportedProvider });
+  } catch (err: any) {
+    unsupportedGenerationBlocked = err.code === 'SOURCE_VALIDATION_FAILED';
+  }
+  assert(unsupportedGenerationBlocked, 'Lesson generation rejects a grounded-looking chapter with unsupported numeric claims');
+
+  // 15. GEMINI TIMEOUT, RETRY & ERROR HANDLING
   console.log('\n--- Gemini Provider: Timeout, Retry & Error Handling ---');
   const runtimeConfig = config as unknown as {
     geminiApiKey: string;
@@ -482,9 +593,14 @@ def scaled_dot_product(q, k, v, d_k):
           title: `Attention concept ${chunkIndex}`,
           overview: 'An explanation of attention.',
           conceptsCovered: ['Attention'],
-          teachingScript: 'Attention combines information from the source in a useful way.',
+          teachingScript: articleCCR.sections.flatMap((section) => section.blocks.map((block) => block.content)).join(' '),
           transitionToNext: '',
-          sourceReferences: [],
+          sourceReferences: articleCCR.sections.flatMap((section, sectionIndex) =>
+            section.blocks.map((block, blockIndex) => ({
+              blockId: block.id || `sec-${sectionIndex + 1}-b${blockIndex + 1}`,
+              sectionTitle: section.heading,
+            })),
+          ),
         }),
       };
     });
